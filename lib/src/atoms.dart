@@ -14,10 +14,12 @@ class Atom {
     this.data,
   });
 
+  /// Adds a child atom to this atom
   void addChild(Atom child) {
     children.add(child);
   }
 
+  /// Updates the size of this atom and all its children
   void updateSize() {
     if (children.isNotEmpty) {
       size = children.map((c) => c.size).reduce((a, b) => a + b);
@@ -26,6 +28,7 @@ class Atom {
     }
   }
 
+  /// Updates the offsets of this atom and all its children
   void updateOffsets(int parentOffset, bool isFirstChild) {
     offset = parentOffset;
     if (type != 'root' && !isFirstChild) {
@@ -48,9 +51,9 @@ class Atom {
     }
   }
 
+  /// Returns a map representation of this atom
   Map<String, dynamic> asMap() {
     final Map<String, dynamic> atom = {};
-    children.map((e) => e.asMap());
     atom[type] = {
       'offset': offset,
       'size': size,
@@ -64,4 +67,16 @@ class Atom {
   String toString() {
     return '$type (size: $size, offset: $offset, data: ${data != null})';
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Atom &&
+          runtimeType == other.runtimeType &&
+          type == other.type &&
+          size == other.size &&
+          offset == other.offset;
+
+  @override
+  int get hashCode => type.hashCode ^ size.hashCode ^ offset.hashCode;
 }
