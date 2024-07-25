@@ -28,37 +28,28 @@ void main(List<String> args) async {
   }
 
   for (String filePath in filePaths) {
+    final handler = MP4Handler(filePath);
+
+    print("===[${path.basename(filePath)}]===");
+
+    for (var entry in handler.metadata.asMap().entries) {
+      if (entry.key == "cover") {
+        continue;
+      }
+      print("[${entry.key.toUpperCase()}]");
+      print("   |__${entry.value}");
+    }
+
+    // Queue multiple operations
+    handler.addMetadata({'title': 'New Title'});
+    handler.updateMetadata({'genre': 'New Genre'});
+    handler.removeMetadata(['artist']);
     try {
-      final handler = MP4Handler(filePath);
-
-      print("===[${path.basename(filePath)}]===");
-
-      for (var entry in handler.metadata.asMap().entries) {
-        if (entry.key == "cover") {
-          continue;
-        }
-        print("[${entry.key.toUpperCase()}]");
-        print("   |__${entry.value}");
-      }
-
-      final success = await handler.updateMetadata({
-        'title': 'New Title',
-        'artist': 'New Artist',
-      });
-      if (success) {
-        print('Metadata updated successfully');
-      } else {
-        print('Failed to update metadata');
-      }
-
-      bool removed = await handler.removeMetadata(['title']);
-      if (removed) {
-        print('Some metadata was removed');
-      } else {
-        print('No metadata was removed');
-      }
-    } on MP4Exception catch (e) {
-      print('Error parsing MP4 file: $e');
+      // Apply all queued changes at once
+      await handler.applyMetadataChanges();
+      print('Metadata changes applied successfully');
+    } catch (e) {
+      print('Failed to apply metadata changes: $e');
     }
   }
 }

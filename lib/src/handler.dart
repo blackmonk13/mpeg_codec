@@ -9,12 +9,23 @@ import 'exceptions.dart';
 import 'genres.dart';
 import 'metadata.dart';
 
+enum OperationType { add, update, remove }
+
+class MetadataOperation {
+  final OperationType type;
+  final String key;
+  final dynamic value;
+
+  MetadataOperation(this.type, this.key, [this.value]);
+}
+
 class MP4Handler {
   late RandomAccessFile _file;
   late Atom _root;
   late String _filePath;
   final Logger _logger = Logger();
   final Metadata _metadata = Metadata();
+  final List<MetadataOperation> _pendingOperations = [];
 
   static const Map<String, String> _friendlyToAtomNames = {
     'title': '©nam',
@@ -661,112 +672,139 @@ class MP4Handler {
     }
   }
 
-  Future<bool> updateMetadata(Map<String, dynamic> newMetadata) async {
+  Future<void> applyMetadataChanges() async {
+    if (_pendingOperations.isEmpty) {
+      _logger.i('No pending metadata operations to apply.');
+      return;
+    }
+
     Atom? ilstAtom = findAtomByPath(['moov', 'udta', 'meta', 'ilst']);
-
     if (ilstAtom == null) {
-      _log('ilst atom not found');
-      return false;
+      throw MP4Exception('ilst atom not found');
     }
 
-    for (var entry in newMetadata.entries) {
-      final atomName = _friendlyToAtomNames[entry.key] ?? entry.key;
-
-      final encodedAtom = encodeMetadataAtom(entry.key, entry.value);
-
-      if (encodedAtom == null) {
-        throw MP4Exception(
-          'Failed to encode metadata for key: ${entry.key}',
-        );
-      }
-
-      Atom? existingAtom = _findAtom(ilstAtom, atomName);
-      bool modified;
-      if (existingAtom == null) {
-        modified = addNode([
-          'root',
-          'moov',
-          'udta',
-          'meta',
-          'ilst',
-          atomName,
-        ], encodedAtom);
-      } else {
-        modified = replaceNode([
-          'root',
-          'moov',
-          'udta',
-          'meta',
-          'ilst',
-          atomName,
-        ], encodedAtom);
-      }
-
-      if (!modified) {
-        return false;
+    for (var operation in _pendingOperations) {
+      switch (operation.type) {
+        case OperationType.add:
+        case OperationType.update:
+          _addOrUpdateMetadata(ilstAtom, operation.key, operation.value);
+          break;
+        case OperationType.remove:
+          _removeMetadata(ilstAtom, operation.key);
+          break;
       }
     }
-    // Sort the atoms inside 'ilst'
+
     _sortIlstAtoms(ilstAtom);
-
-    // Update sizes and offsets
     updateTreeSizes();
     updateTreeOffsets();
 
-    final tempFilePath = await _writeUpdatedAtoms();
-
-    // Replace the original file with the temporary file
-    await File(tempFilePath).copy(_file.path);
-    await File(tempFilePath).delete();
-
-    // Reopen the file and rebuild the atom tree
-    _setup();
-
-    return true;
+    try {
+      await _safeWriteUpdatedAtoms();
+      _pendingOperations.clear();
+      _setup(); // Reopen the file and rebuild the atom tree
+    } catch (e) {
+      throw MP4Exception('Failed to apply metadata changes: $e');
+    }
   }
 
-  Future<bool> removeMetadata(List<String> keysToRemove) async {
-    Atom? ilstAtom = findAtomByPath(['moov', 'udta', 'meta', 'ilst']);
-    if (ilstAtom == null) {
-      _log('ilst atom not found');
-      return false;
+  void _addOrUpdateMetadata(
+    Atom ilstAtom,
+    String key,
+    dynamic value,
+  ) {
+    final atomName = _friendlyToAtomNames[key] ?? key;
+    final encodedAtom = encodeMetadataAtom(key, value);
+
+    if (encodedAtom == null) {
+      throw MP4Exception('Failed to encode metadata for key: $key');
     }
 
-    bool removedAny = false;
-
-    for (String key in keysToRemove) {
-      final atomName = _friendlyToAtomNames[key] ?? key;
-
-      // Find the index of the atom to remove
-      int indexToRemove =
-          ilstAtom.children.indexWhere((atom) => atom.type == atomName);
-
-      if (indexToRemove != -1) {
-        // Remove the atom
-        ilstAtom.children.removeAt(indexToRemove);
-        removedAny = true;
-        _log('Removed metadata: $key');
-      } else {
-        _log('Metadata not found: $key');
-      }
+    Atom? existingAtom = _findAtom(ilstAtom, atomName);
+    if (existingAtom != null) {
+      int index = ilstAtom.children.indexOf(existingAtom);
+      ilstAtom.children[index] = encodedAtom;
+    } else {
+      ilstAtom.children.add(encodedAtom);
     }
+  }
 
-    if (removedAny) {
-      // Update sizes and offsets
-      updateTreeSizes();
-      updateTreeOffsets();
+  void _removeMetadata(Atom ilstAtom, String key) {
+    final atomName = _friendlyToAtomNames[key] ?? key;
+    ilstAtom.children.removeWhere((atom) => atom.type == atomName);
+  }
 
-      final tempFilePath = await _writeUpdatedAtoms();
+  Future<void> _safeWriteUpdatedAtoms() async {
+    final tempDir = await Directory.systemTemp.createTemp('mp4_update_');
+    final tempFile = File('${tempDir.path}/temp_mp4');
+    final backupFile = File('$_filePath.bak');
+
+    try {
+      // Write to temporary file
+      final tempRAF = await tempFile.open(mode: FileMode.write);
+      await _writeAtomRecursive(_root, tempRAF, 0);
+      await tempRAF.close();
+
+      // Create a backup of the original file
+      await File(_filePath).copy(backupFile.path);
 
       // Replace the original file with the temporary file
-      await File(tempFilePath).copy(_file.path);
-      await File(tempFilePath).delete();
+      await tempFile.copy(_filePath);
 
-      // Reopen the file and rebuild the atom tree
-      _setup();
+      // If everything succeeded, delete the backup and temp files
+      await backupFile.delete();
+      await tempFile.delete();
+      await tempDir.delete();
+    } catch (e) {
+      _logger.e('Error during file write: $e');
+
+      // If backup exists, restore it
+      if (await backupFile.exists()) {
+        await backupFile.copy(_filePath);
+        await backupFile.delete();
+      }
+
+      // Clean up temp files
+      if (await tempFile.exists()) await tempFile.delete();
+      if (await tempDir.exists()) await tempDir.delete();
+
+      throw MP4Exception(
+        'Failed to write updated atoms: $e',
+      );
     }
+  }
 
-    return removedAny;
+  void addMetadata(Map<String, dynamic> newMetadata) {
+    for (var entry in newMetadata.entries) {
+      _pendingOperations.add(MetadataOperation(
+        OperationType.add,
+        entry.key,
+        entry.value,
+      ));
+    }
+  }
+
+  void updateMetadata(Map<String, dynamic> newMetadata) {
+    for (var entry in newMetadata.entries) {
+      _pendingOperations.add(MetadataOperation(
+        OperationType.update,
+        entry.key,
+        entry.value,
+      ));
+    }
+  }
+
+  void removeMetadata(List<String> keys) {
+    for (var key in keys) {
+      _pendingOperations.add(MetadataOperation(
+        OperationType.remove,
+        key,
+      ));
+    }
+  }
+
+  void clearPendingOperations() {
+    _pendingOperations.clear();
   }
 
   void _sortIlstAtoms(Atom ilstAtom) {
@@ -787,20 +825,6 @@ class MP4Handler {
         return indexA.compareTo(indexB);
       }
     });
-  }
-
-  Future<String> _writeUpdatedAtoms() async {
-    final tempDir = await Directory.systemTemp.createTemp('mp4_update_');
-    final tempFile = File('${tempDir.path}/temp_mp4');
-    final tempRAF = await tempFile.open(mode: FileMode.write);
-
-    try {
-      await _writeAtomRecursive(_root, tempRAF, 0);
-    } finally {
-      await tempRAF.close();
-    }
-
-    return tempFile.path;
   }
 
   void close() {
