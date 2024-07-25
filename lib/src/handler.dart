@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
+
 import 'package:logger/logger.dart';
 
 import 'atoms.dart';
@@ -723,6 +723,50 @@ class MP4Handler {
     _setup();
 
     return true;
+  }
+
+  Future<bool> removeMetadata(List<String> keysToRemove) async {
+    Atom? ilstAtom = findAtomByPath(['moov', 'udta', 'meta', 'ilst']);
+    if (ilstAtom == null) {
+      _log('ilst atom not found');
+      return false;
+    }
+
+    bool removedAny = false;
+
+    for (String key in keysToRemove) {
+      final atomName = _friendlyToAtomNames[key] ?? key;
+
+      // Find the index of the atom to remove
+      int indexToRemove =
+          ilstAtom.children.indexWhere((atom) => atom.type == atomName);
+
+      if (indexToRemove != -1) {
+        // Remove the atom
+        ilstAtom.children.removeAt(indexToRemove);
+        removedAny = true;
+        _log('Removed metadata: $key');
+      } else {
+        _log('Metadata not found: $key');
+      }
+    }
+
+    if (removedAny) {
+      // Update sizes and offsets
+      updateTreeSizes();
+      updateTreeOffsets();
+
+      final tempFilePath = await _writeUpdatedAtoms();
+
+      // Replace the original file with the temporary file
+      await File(tempFilePath).copy(_file.path);
+      await File(tempFilePath).delete();
+
+      // Reopen the file and rebuild the atom tree
+      _setup();
+    }
+
+    return removedAny;
   }
 
   void _sortIlstAtoms(Atom ilstAtom) {

@@ -50,6 +50,13 @@ void main(List<String> args) async {
       } else {
         print('Failed to update metadata');
       }
+
+      bool removed = await handler.removeMetadata(['title']);
+      if (removed) {
+        print('Some metadata was removed');
+      } else {
+        print('No metadata was removed');
+      }
     } on MP4Exception catch (e) {
       print('Error parsing MP4 file: $e');
     }
