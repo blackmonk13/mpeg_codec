@@ -527,18 +527,18 @@ class MP4Handler {
   }
 
   void updateTreeSizes() {
-    _updateNodeSize(_root, true);
+    _updateNodeSize(_root);
   }
 
-  void _updateNodeSize(Atom node, bool isFirstChild) {
+  void _updateNodeSize(Atom node) {
     for (int i = 0; i < node.children.length; i++) {
-      _updateNodeSize(node.children[i], i == 0);
+      _updateNodeSize(node.children[i]);
     }
     node.updateSize();
   }
 
   void updateTreeOffsets() {
-    _root.updateOffsets(0, true);
+    _root.updateOffsets(0);
   }
 
   Future<void> writeToFile(String outputPath) async {

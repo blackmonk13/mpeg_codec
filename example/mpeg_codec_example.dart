@@ -41,7 +41,7 @@ void main(List<String> args) async {
     }
 
     // Queue multiple operations
-    handler.addMetadata({'title': 'New Title'});
+    handler.addMetadata({'title': 'New Title', 'artist': 'Artist'});
     handler.updateMetadata({'genre': 'New Genre'});
     handler.removeMetadata(['artist']);
     try {
