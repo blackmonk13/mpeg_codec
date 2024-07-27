@@ -21,7 +21,7 @@ void main(List<String> args) async {
   final filePaths = <String>[];
   await for (FileSystemEntity el in folder.list(recursive: true)) {
     if (el is File) {
-      if (path.extension(path.basename(el.path)) == '.m4a') {
+      if (['.m4a', '.mp4'].contains(path.extension(path.basename(el.path)))) {
         filePaths.add(el.path);
       }
     }
