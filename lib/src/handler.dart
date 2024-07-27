@@ -50,13 +50,6 @@ abstract class CodecHandler {
     file = File(_filePath).openSync(mode: FileMode.read);
   }
 
-  /// Logs a message using the logger.
-  ///
-  /// [message] is the message to be logged.
-  void log(dynamic message) {
-    logger.d(message);
-  }
-
   /// Parses the metadata from the file.
   void parseMetadata();
 

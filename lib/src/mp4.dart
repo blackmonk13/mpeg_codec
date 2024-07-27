@@ -152,7 +152,7 @@ class MP4Handler extends CodecHandler {
       final atom = Atom(type, size, offset);
       parent.children.add(atom);
 
-      log('Parsed atom: $type, size: $size, offset: $offset');
+      logger.d('Parsed atom: $type, size: $size, offset: $offset');
 
       if (parent.type == 'ilst') {
         // Special handling for 'ilst' children
@@ -198,7 +198,7 @@ class MP4Handler extends CodecHandler {
       final type = _readFourCC();
 
       if (size < 8) {
-        log(
+        logger.d(
           'Invalid ilst child size or overflow: $type, size: $size, offset: $offset',
         );
         break;
@@ -207,7 +207,7 @@ class MP4Handler extends CodecHandler {
       final atom = Atom(type, size, offset);
       parent.children.add(atom);
 
-      log('Parsed ilst child: $type, size: $size, offset: $offset');
+      logger.d('Parsed ilst child: $type, size: $size, offset: $offset');
 
       // Read the data for all ilst children
       file.setPositionSync(offset + 8);
@@ -258,7 +258,7 @@ class MP4Handler extends CodecHandler {
 
     final moovAtom = _findAtom(_root, 'moov');
     if (moovAtom == null) {
-      log('moov atom not found');
+      logger.d('moov atom not found');
       return;
     }
 
@@ -267,19 +267,19 @@ class MP4Handler extends CodecHandler {
 
     final udtaAtom = _findAtom(moovAtom, 'udta');
     if (udtaAtom == null) {
-      log('udta atom not found');
+      logger.d('udta atom not found');
       return;
     }
 
     final metaAtom = _findAtom(udtaAtom, 'meta');
     if (metaAtom == null) {
-      log('meta atom not found');
+      logger.d('meta atom not found');
       return;
     }
 
     final ilstAtom = _findAtom(metaAtom, 'ilst');
     if (ilstAtom == null) {
-      log('ilst atom not found');
+      logger.d('ilst atom not found');
       return;
     }
 
@@ -307,7 +307,7 @@ class MP4Handler extends CodecHandler {
     if (dataAtom == null ||
         dataAtom.data == null ||
         dataAtom.data!.length < 8) {
-      log('Invalid data atom for ${atom.type}');
+      logger.d('Invalid data atom for ${atom.type}');
       return;
     }
 
@@ -365,7 +365,7 @@ class MP4Handler extends CodecHandler {
         break;
 
       default:
-        log('Unhandled metadata type: ${atom.type}');
+        logger.d('Unhandled metadata type: ${atom.type}');
     }
   }
 
@@ -379,7 +379,7 @@ class MP4Handler extends CodecHandler {
   /// - atom: The MP4 atom containing the 'mvhd' atom data to be parsed.
   void _parseMvhdAtom(Atom? atom) {
     if (atom?.data == null) {
-      log('mvhd atom data not found');
+      logger.d('mvhd atom data not found');
       return;
     }
 
@@ -410,7 +410,7 @@ class MP4Handler extends CodecHandler {
   /// and sets the compatible brands metadata.
   void _parseFtypAtom(Atom? atom) {
     if (atom?.data == null) {
-      log('ftyp atom data not found');
+      logger.d('ftyp atom data not found');
       return;
     }
 
@@ -670,7 +670,7 @@ class MP4Handler extends CodecHandler {
   ///   Returns true if the node was added, and false otherwise.
   bool addNode(List<String> path, Atom newNode) {
     if (path.isEmpty || path[0] != _root.type) {
-      log('Path must start with the root node type');
+      logger.d('Path must start with the root node type');
       return false;
     }
 
@@ -717,7 +717,7 @@ class MP4Handler extends CodecHandler {
       try {
         current = current.children.firstWhere((node) => node.type == path[i]);
       } catch (e) {
-        log('Node not found: ${path[i]}');
+        logger.d('Node not found: ${path[i]}');
         return false;
       }
     }
@@ -776,7 +776,7 @@ class MP4Handler extends CodecHandler {
       outputFile.closeSync();
     }
 
-    log('File written successfully to: $outputPath');
+    logger.d('File written successfully to: $outputPath');
   }
 
   /// Recursively writes the given [atom] and its children to the given [outputFile]
@@ -843,7 +843,7 @@ class MP4Handler extends CodecHandler {
   ///
   /// This function reads the data from the 'mdat' atom and writes it to
   /// [outputFile] starting at [dataOffset]. The data is copied in chunks of
-  /// 1 MB.
+  /// 5 MB.
   ///
   /// Returns: A [Future] that completes when the data has been successfully
   /// copied.
@@ -856,8 +856,8 @@ class MP4Handler extends CodecHandler {
     file.setPositionSync(mdatAtom.offset + 8);
     outputFile.setPositionSync(dataOffset);
 
-    final bufferSize = 1024 * 1024; // 1 MB buffer
-    var remaining = mdatAtom.size - 8;
+    final bufferSize = 5 * 1024 * 1024; // 5 MB buffer
+    int remaining = mdatAtom.size - 8;
 
     while (remaining > 0) {
       final chunkSize = remaining > bufferSize ? bufferSize : remaining;
