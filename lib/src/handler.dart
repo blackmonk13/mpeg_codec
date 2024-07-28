@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:logger/logger.dart';
 
@@ -140,6 +141,20 @@ abstract class CodecHandler {
   /// Clears all pending metadata operations.
   void clearPendingOperations() {
     pendingOperations.clear();
+  }
+
+  /// Converts an integer to a byte array.
+  ///
+  /// Parameters:
+  /// - [value]: The integer to convert.
+  /// - [byteCount]: The number of bytes in the resulting array.
+  ///
+  /// Returns:
+  ///   A [Uint8List] containing the bytes of the given integer in big-endian
+  ///   order.
+  Uint8List intToBytes(int value, int byteCount) {
+    final bytes = ByteData(byteCount)..setUint32(0, value, Endian.big);
+    return bytes.buffer.asUint8List();
   }
 
   /// Closes the file.

@@ -1,8 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 
+import 'genres.dart';
+import 'utils.dart';
 import 'handler.dart';
 
 class ID3v2Tag {
@@ -35,15 +38,46 @@ final Map<String, String> _friendlyToFrameIds = {
   'title': 'TIT2',
   'artist': 'TPE1',
   'album': 'TALB',
+  'albumArtist': 'TPE2',
   'year': 'TYER',
+  'recordingTime': 'TDRC',
   'track': 'TRCK',
   'genre': 'TCON',
   'comment': 'COMM',
   'picture': 'APIC',
-  // Add more mappings as needed
+  'composer': 'TCOM',
+  'conductor': 'TPE3',
+  'copyright': 'TCOP',
+  'discNumber': 'TPOS',
+  'encodedBy': 'TENC',
+  'mood': 'TMOO',
+  'originalArtist': 'TOPE',
+  'bpm': 'TBPM',
+  'publisher': 'TPUB',
+  'isrc': 'TSRC',
+  'language': 'TLAN',
+  'lyrics': 'USLT',
+  'synchronizedLyrics': 'SYLT',
+  'involvedPeople': 'TIPL',
+  'musicianCredits': 'TMCL',
+  'encodingTime': 'TDEN',
+  'originalReleaseTime': 'TDOR',
+  'releaseTime': 'TDRL',
+  'taggingTime': 'TDTG',
+  'website': 'WOAR',
+  'rating': 'POPM',
+  'replayGain': 'RVA2',
 };
 
+String _frameIdToKey(String frameId) {
+  return _friendlyToFrameIds.entries
+      .firstWhere((entry) => entry.value == frameId,
+          orElse: () => MapEntry(frameId.toLowerCase(), frameId))
+      .key;
+}
+
 class ID3Handler extends CodecHandler {
+  late ID3v2Tag _id3v2Tag;
   final Map<String, Function> _customFrameHandlers = {};
   final Map<String, List<Map<String, dynamic>>> _groupedFrames = {};
 
@@ -59,7 +93,7 @@ class ID3Handler extends CodecHandler {
   void parseMetadata() {
     openRead();
     try {
-      _parseID3v2();
+      _id3v2Tag = _parseID3v2();
       _parseID3v1();
       _parseAPEv2();
       _parseVorbisComments();
@@ -70,7 +104,7 @@ class ID3Handler extends CodecHandler {
     }
   }
 
-  void _parseID3v2() {
+  ID3v2Tag _parseID3v2() {
     file.setPositionSync(0);
     var header = file.readSync(10);
     if (String.fromCharCodes(header.sublist(0, 3)) == 'ID3') {
@@ -102,13 +136,17 @@ class ID3Handler extends CodecHandler {
         dataOffset = _parseExtendedHeader(tagData, version);
       }
 
-      _parseID3v2Frames(tagData.sublist(dataOffset), version);
+      List<ID3v2Frame> frames =
+          _parseID3v2Frames(tagData.sublist(dataOffset), version);
 
       if (footerPresent) {
         _parseID3v2Footer(tagData.sublist(tagData.length - 10));
       }
+
+      return ID3v2Tag(version, revision, flags, size, frames);
     } else {
       logger.w('No ID3v2 tag found');
+      return ID3v2Tag(0, 0, 0, 0, []);
     }
   }
 
@@ -137,7 +175,8 @@ class ID3Handler extends CodecHandler {
     }
   }
 
-  void _parseID3v2Frames(Uint8List data, int version) {
+  List<ID3v2Frame> _parseID3v2Frames(Uint8List data, int version) {
+    List<ID3v2Frame> frames = [];
     int offset = 0;
     while (offset < data.length) {
       if (offset + 10 > data.length) {
@@ -162,7 +201,9 @@ class ID3Handler extends CodecHandler {
 
       var frameData = data.sublist(offset + 10, offset + 10 + frameSize);
       try {
-        _parseID3v2Frame(frameId, frameData, frameFlags, version);
+        ID3v2Frame frame = ID3v2Frame(frameId, frameSize, frameData);
+        _parseID3v2Frame(frame, frameFlags, version);
+        frames.add(frame);
       } catch (e) {
         logger.w('Error parsing frame $frameId: $e');
       }
@@ -170,53 +211,51 @@ class ID3Handler extends CodecHandler {
       offset += 10 + frameSize;
     }
 
-    // Process grouped frames after parsing all frames
-    _processGroupedFrames();
+    return frames;
   }
 
-  void _parseID3v2Frame(
-    String frameId,
-    Uint8List frameData,
-    int frameFlags,
-    int version,
-  ) {
+  void _parseID3v2Frame(ID3v2Frame frame, int frameFlags, int version) {
     bool dataLengthIndicator = (frameFlags & 0x0001) != 0;
     bool compressed = (frameFlags & 0x0008) != 0;
     bool encrypted = (frameFlags & 0x0004) != 0;
     bool grouped = (frameFlags & 0x0040) != 0;
 
     if (encrypted) {
-      logger.w('Encrypted frames are not supported: $frameId');
+      logger.w('Encrypted frames are not supported: ${frame.id}');
       return;
     }
 
     int dataOffset = dataLengthIndicator ? 4 : 0;
-    Uint8List decompressedData = frameData.sublist(dataOffset);
+    Uint8List decompressedData = frame.data.sublist(dataOffset);
 
     if (compressed) {
       try {
-        int decompressedSize = _syncSafeInteger(frameData.sublist(0, 4));
+        int decompressedSize = _syncSafeInteger(frame.data.sublist(0, 4));
         decompressedData =
             Uint8List.fromList(ZLibDecoder().decodeBytes(decompressedData));
         if (decompressedData.length != decompressedSize) {
-          logger.w('Decompressed size mismatch for frame $frameId');
+          logger.w('Decompressed size mismatch for frame ${frame.id}');
         }
       } catch (e) {
-        logger.e('Error decompressing frame $frameId: $e');
+        logger.e('Error decompressing frame ${frame.id}: $e');
         return;
       }
     }
 
     if (grouped) {
-      _handleGroupedFrame(frameId, decompressedData, version);
+      _handleGroupedFrame(frame.id, decompressedData, version);
       return;
     }
 
-    if (_customFrameHandlers.containsKey(frameId)) {
-      _customFrameHandlers[frameId]!(decompressedData, version);
+    if (_customFrameHandlers.containsKey(frame.id)) {
+      _customFrameHandlers[frame.id]!(decompressedData, version);
       return;
     }
 
+    _parseStandardFrame(frame.id, decompressedData);
+  }
+
+  void _parseStandardFrame(String frameId, Uint8List data) {
     switch (frameId) {
       case 'TIT2':
       case 'TPE1':
@@ -226,31 +265,32 @@ class ID3Handler extends CodecHandler {
       case 'TDRC':
       case 'TCON':
       case 'TRCK':
-        _parseTextFrame(frameId, decompressedData);
+      case 'TPOS':
+        _parseTextFrame(frameId, data);
         break;
       case 'TXXX':
-        _parseUserDefinedTextFrame(decompressedData);
+        _parseUserDefinedTextFrame(data);
         break;
       case 'COMM':
-        _parseCommentFrame(decompressedData);
+        _parseCommentFrame(data);
         break;
       case 'APIC':
-        _parseAPICFrame(decompressedData);
+        _parseAPICFrame(data);
         break;
       case 'USLT':
-        _parseUnsynchronizedLyricsFrame(decompressedData);
+        _parseUnsynchronizedLyricsFrame(data);
         break;
       case 'SYLT':
-        _parseSynchronizedLyricsFrame(decompressedData, version);
+        _parseSynchronizedLyricsFrame(data, _id3v2Tag.version);
         break;
       case 'CHAP':
-        _parseChapterFrame(decompressedData, version);
+        _parseChapterFrame(data, _id3v2Tag.version);
         break;
       case 'CTOC':
-        _parseTableOfContentsFrame(decompressedData, version);
+        _parseTableOfContentsFrame(data, _id3v2Tag.version);
         break;
       case 'PRIV':
-        _parsePrivateFrame(decompressedData);
+        _parsePrivateFrame(data);
         break;
       default:
         logger.i('Unhandled ID3v2 frame: $frameId');
@@ -269,18 +309,6 @@ class ID3Handler extends CodecHandler {
       'groupId': groupId,
       'data': frameData,
     });
-  }
-
-  void _processGroupedFrames() {
-    _groupedFrames.forEach((frameId, frames) {
-      frames.sort((a, b) => a['groupId'].compareTo(b['groupId']));
-      var combinedData = frames
-          .map((frame) => frame['data'] as Uint8List)
-          .reduce((a, b) => Uint8List.fromList([...a, ...b]));
-      _parseID3v2Frame(
-          frameId, combinedData, 0, 4); // Assume version 4 for grouped frames
-    });
-    _groupedFrames.clear();
   }
 
   void _parseSynchronizedLyricsFrame(Uint8List data, int version) {
@@ -480,29 +508,6 @@ class ID3Handler extends CodecHandler {
     }
   }
 
-  String _frameIdToKey(String frameId) {
-    switch (frameId) {
-      case 'TIT2':
-        return 'title';
-      case 'TPE1':
-        return 'artist';
-      case 'TPE2':
-        return 'albumArtist';
-      case 'TALB':
-        return 'album';
-      case 'TYER':
-        return 'year';
-      case 'TDRC':
-        return 'recordingTime';
-      case 'TCON':
-        return 'genre';
-      case 'TRCK':
-        return 'track';
-      default:
-        return frameId.toLowerCase();
-    }
-  }
-
   List<Uint8List> _splitNullTerminated(Uint8List data, int encoding) {
     List<Uint8List> result = [];
     int start = 0;
@@ -695,13 +700,267 @@ class ID3Handler extends CodecHandler {
 
   @override
   Future<void> writeToFile(String outputPath) async {
-    // To be implemented
-    throw UnimplementedError();
+    final outputFile = await File(outputPath).open(mode: FileMode.write);
+
+    try {
+      await _writeID3v2Tag(outputFile);
+      await _copyAudioData(outputFile);
+      await _writeID3v1Tag(outputFile);
+    } finally {
+      outputFile.closeSync();
+    }
+
+    logger.d('File written successfully to: $outputPath');
+  }
+
+  Future<void> _writeID3v2Tag(RandomAccessFile outputFile) async {
+    outputFile.setPositionSync(0);
+    outputFile.writeFromSync(utf8.encode('ID3'));
+    outputFile.writeFromSync([0x04, 0x00, 0x00]); // Version and flags
+
+    int sizePosition = outputFile.positionSync();
+    outputFile.writeFromSync([0x00, 0x00, 0x00, 0x00]); // Placeholder for size
+
+    int startPosition = outputFile.positionSync();
+
+    for (var frame in _id3v2Tag.frames) {
+      await _writeFrame(outputFile, frame);
+    }
+
+    int endPosition = outputFile.positionSync();
+    int tagSize = endPosition - startPosition;
+
+    outputFile.setPositionSync(sizePosition);
+    outputFile.writeFromSync(_getSyncSafeBytes(tagSize));
+    outputFile.setPositionSync(endPosition);
+  }
+
+  Future<void> _writeFrame(
+    RandomAccessFile outputFile,
+    ID3v2Frame frame,
+  ) async {
+    outputFile.writeFromSync(utf8.encode(frame.id));
+    outputFile.writeFromSync(_getSyncSafeBytes(frame.size));
+    outputFile.writeFromSync([0x00, 0x00]); // Frame flags
+    outputFile.writeFromSync(frame.data);
+  }
+
+  Future<void> _copyAudioData(RandomAccessFile outputFile) async {
+    openRead();
+    file.setPositionSync(_id3v2Tag.size);
+    outputFile.setPositionSync(outputFile.lengthSync());
+
+    final bufferSize = 5 * 1024 * 1024; // 5 MB buffer
+    var buffer = Uint8List(bufferSize);
+    int bytesRead;
+
+    while ((bytesRead = file.readIntoSync(buffer)) > 0) {
+      outputFile.writeFromSync(buffer.sublist(0, bytesRead));
+    }
+    close();
+  }
+
+  Future<void> _writeID3v1Tag(RandomAccessFile outputFile) async {
+    outputFile.setPositionSync(outputFile.lengthSync());
+    outputFile.writeFromSync(utf8.encode('TAG'));
+
+    // Write title (30 bytes)
+    String title = getMetadata<String>('title') ?? '';
+    outputFile.writeFromSync(_padOrTruncate(title, 30));
+
+    // Write artist (30 bytes)
+    String artist = getMetadata<String>('artist') ?? '';
+    outputFile.writeFromSync(_padOrTruncate(artist, 30));
+
+    // Write album (30 bytes)
+    String album = getMetadata<String>('album') ?? '';
+    outputFile.writeFromSync(_padOrTruncate(album, 30));
+
+    // Write year (4 bytes)
+    String year = getMetadata<String>('year') ?? '';
+    outputFile.writeFromSync(_padOrTruncate(year, 4));
+
+    // Write comment (28 or 30 bytes)
+    String comment = getMetadata<String>('comment') ?? '';
+    int? track = getMetadata<int>('track');
+    if (track != null) {
+      // ID3v1.1 format (with track number)
+      outputFile.writeFromSync(_padOrTruncate(comment, 28));
+      outputFile.writeFromSync([0, track]);
+    } else {
+      // ID3v1.0 format
+      outputFile.writeFromSync(_padOrTruncate(comment, 30));
+    }
+
+    // Write genre (1 byte)
+    String genre = getMetadata<String>('genre') ?? '';
+    int genreId = genres.indexOf(genre);
+    outputFile.writeFromSync([genreId >= 0 ? genreId : 255]);
+  }
+
+  ID3v2Frame? encodeMetadataFrame(String key, dynamic value) {
+    final frameId = _friendlyToFrameIds[key] ?? key;
+    final encodedValue = _encodeMetadataValue(key, value);
+
+    if (encodedValue == null) {
+      logger.w('Failed to encode metadata for key: $key');
+      return null;
+    }
+
+    final frameData = Uint8List.fromList(encodedValue);
+    return ID3v2Frame(frameId, frameData.length, frameData);
+  }
+
+  Uint8List _padOrTruncate(String text, int length) {
+    if (text.length > length) {
+      return Uint8List.fromList(utf8.encode(text.substring(0, length)));
+    } else {
+      return Uint8List.fromList(utf8.encode(text).padRight(length, 0));
+    }
+  }
+
+  Uint8List? _encodeMetadataValue(String key, dynamic value) {
+    if (value is String) {
+      return Uint8List.fromList(
+          [0x03, ...utf8.encode(value)]); // UTF-8 encoding
+    } else if (value is int) {
+      return Uint8List.fromList(
+          [0x00, ...intToBytes(value, 4)]); // ISO-8859-1 encoding
+    } else if (value is bool) {
+      return Uint8List.fromList([0x00, value ? 1 : 0]); // ISO-8859-1 encoding
+    } else if (value is List<int> && value.length == 2) {
+      // For numeric pairs like track number or disk number
+      return Uint8List.fromList([
+        0x00,
+        ...value.expand((i) => intToBytes(i, 2))
+      ]); // ISO-8859-1 encoding
+    } else if (value is Uint8List && key == 'picture') {
+      // Handle artwork (APIC frame)
+      String mimeType = _getMimeType(value);
+      return Uint8List.fromList([
+        0x00, // Text encoding (ISO-8859-1)
+        ...ascii.encode('$mimeType\0'), // MIME type
+        0x03, // Picture type (0x03 = front cover)
+        ...ascii.encode('Cover\0'), // Description
+        ...value // Picture data
+      ]);
+    } else {
+      logger.w(
+          'Unsupported metadata value type: ${value.runtimeType} for key: $key');
+      return null;
+    }
+  }
+
+  String _getMimeType(Uint8List imageData) {
+    if (imageData.length > 2) {
+      if (imageData[0] == 0xFF && imageData[1] == 0xD8) {
+        return 'image/jpeg';
+      } else if (imageData[0] == 0x89 && imageData[1] == 0x50) {
+        return 'image/png';
+      }
+    }
+    return 'image/unknown';
   }
 
   @override
   Future<void> applyMetadataChanges() async {
-    // To be implemented
-    throw UnimplementedError();
+    if (pendingOperations.isEmpty) {
+      logger.i('No pending metadata operations to apply.');
+      return;
+    }
+
+    for (MetadataOperation operation in pendingOperations) {
+      switch (operation.type) {
+        case OperationType.add:
+        case OperationType.update:
+          _addOrUpdateMetadata(operation.key, operation.value);
+          break;
+        case OperationType.remove:
+          _removeMetadata(operation.key);
+          break;
+      }
+    }
+
+    _updateTagSize();
+
+    try {
+      await _safeWriteUpdatedTag();
+      pendingOperations.clear();
+      parseMetadata(); // Reopen the file and rebuild the ID3 tag
+    } catch (e) {
+      throw ID3Exception('Failed to apply metadata changes: $e');
+    }
+  }
+
+  void _addOrUpdateMetadata(String key, dynamic value) {
+    final frameId = _friendlyToFrameIds[key] ?? key;
+    final encodedFrame = encodeMetadataFrame(key, value);
+
+    if (encodedFrame == null) {
+      throw ID3Exception('Failed to encode metadata for key: $key');
+    }
+
+    int existingIndex =
+        _id3v2Tag.frames.indexWhere((frame) => frame.id == frameId);
+    if (existingIndex != -1) {
+      _id3v2Tag.frames[existingIndex] = encodedFrame;
+    } else {
+      _id3v2Tag.frames.add(encodedFrame);
+    }
+  }
+
+  void _removeMetadata(String key) {
+    final frameId = _friendlyToFrameIds[key] ?? key;
+    _id3v2Tag.frames.removeWhere((frame) => frame.id == frameId);
+  }
+
+  void _updateTagSize() {
+    _id3v2Tag.size =
+        _id3v2Tag.frames.fold(10, (sum, frame) => sum + frame.size + 10);
+  }
+
+  Future<void> _safeWriteUpdatedTag() async {
+    final tempDir = await Directory.systemTemp.createTemp('id3_update_');
+    final tempFile = File('${tempDir.path}/temp_id3');
+    final backupFile = File('${file.path}.bak');
+
+    try {
+      // Write to temporary file
+      await writeToFile(tempFile.path);
+
+      // Create a backup of the original file
+      await File(file.path).copy(backupFile.path);
+
+      // Replace the original file with the temporary file
+      await tempFile.copy(file.path);
+
+      // If everything succeeded, delete the backup and temp files
+      await backupFile.delete();
+      await tempFile.delete();
+      await tempDir.delete();
+    } catch (e) {
+      logger.e('Error during file write: $e');
+
+      // If backup exists, restore it
+      if (await backupFile.exists()) {
+        await backupFile.copy(file.path);
+        await backupFile.delete();
+      }
+
+      // Clean up temp files
+      if (await tempFile.exists()) await tempFile.delete();
+      if (await tempDir.exists()) await tempDir.delete();
+
+      throw ID3Exception('Failed to write updated ID3 tag: $e');
+    }
+  }
+
+  List<int> _getSyncSafeBytes(int value) {
+    return [
+      (value >> 21) & 0x7F,
+      (value >> 14) & 0x7F,
+      (value >> 7) & 0x7F,
+      value & 0x7F,
+    ];
   }
 }

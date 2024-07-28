@@ -12,6 +12,9 @@
 /// - `src/genres.dart`: Provides functions for working with genres, such as
 ///   converting genres to a formatted string for MP4 metadata.
 ///
+/// - `src/id3.dart`: Contains utility functions and classes for working with
+///   ID3 encoded files, such as reading and writing ID3 data.
+///
 /// - `src/handler.dart`: Contains classes and functions for handling MP4 metadata
 ///   operations, such as reading and writing metadata to MP4 files.
 ///
@@ -25,5 +28,6 @@ library;
 export 'src/exceptions.dart';
 export 'src/genres.dart';
 export 'src/handler.dart';
+export 'src/id3.dart';
 export 'src/metadata.dart';
 export 'src/mp4.dart';
