@@ -32,13 +32,25 @@ class MetadataOperation {
   MetadataOperation(this.type, this.key, [this.value]);
 }
 
-/// A base class for handling codec operations, such as reading, writing, and modifying metadata.
+
+/// Abstract class representing a codec handler for various audio file formats.
+/// This class provides methods for reading, parsing, modifying, and writing metadata in audio files.
 abstract class CodecHandler {
+  /// The [RandomAccessFile] object for the opened file.
   late RandomAccessFile file;
+
+  /// The file path of the opened audio file.
   late String _filePath;
+
+  /// The [Logger] object for logging messages.
   final Logger logger = Logger();
+
+  /// The [Metadata] object containing the parsed metadata from the audio file.
   final Metadata _metadata = Metadata();
+
+  /// A list of [MetadataOperation] objects representing pending metadata changes to be applied.
   final List<MetadataOperation> pendingOperations = [];
+
 
   /// Constructs a new instance of [CodecHandler].
   ///
@@ -57,7 +69,7 @@ abstract class CodecHandler {
 
   /// Retrieves the genre string associated with the given genre ID.
   ///
-  /// If the genre ID is within the valid range (0 to [genres.length] - 1),
+  /// If the genre ID is within the valid range,
   /// the function returns the corresponding genre string from the [genres] list.
   /// Otherwise, it returns 'Unknown'.
   ///

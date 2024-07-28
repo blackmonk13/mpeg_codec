@@ -4,18 +4,11 @@ import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 
+import 'exceptions.dart';
 import 'genres.dart';
 import 'id3_tags.dart';
 import 'utils.dart';
 import 'handler.dart';
-
-class ID3Exception implements Exception {
-  final String message;
-  ID3Exception(this.message);
-
-  @override
-  String toString() => 'ID3Exception: $message';
-}
 
 final Map<String, String> _friendlyToFrameIds = {
   'title': 'TIT2',
@@ -59,9 +52,8 @@ String _frameIdToKey(String frameId) {
       .key;
 }
 
-/// A class to handle ID3 tag operations.
-///
-/// This class provides methods for reading, writing, and manipulating ID3 tags in various formats.
+/// A class to handle ID3 tag operations.This class provides methods for 
+/// reading, writing, and manipulating ID3 tags in various formats.
 /// It supports ID3v1, ID3v2, and APEv2 tag formats.
 class ID3Handler extends CodecHandler {
   /// The ID3v2 tag being handled.

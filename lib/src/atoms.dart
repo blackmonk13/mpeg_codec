@@ -1,12 +1,24 @@
 import 'dart:typed_data';
 import 'package:collection/collection.dart';
 
-/// Represents an atom (box) in an MP4 file.
+/// Represents an atom in a binary data structure.
+///
+/// An atom is a self-contained unit of data within a file format,
+/// typically containing a type, size, offset, optional data, and a list of child atoms.
 class Atom {
+  /// The type of the atom.
   String type;
+
+  /// The size of the atom in bytes.
   int size;
+
+  /// The offset of the atom in the file.
   int offset;
+
+  /// The optional data associated with the atom.
   Uint8List? data;
+
+  /// The list of child atoms contained within this atom.
   List<Atom> children = [];
 
   /// Constructs an instance of [Atom].

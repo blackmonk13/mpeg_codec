@@ -1,4 +1,22 @@
-const genres = [
+/// A list of music genres.
+///
+/// This list contains a comprehensive collection of music genres, covering various
+/// styles and sub-genres. It is used in the application to provide a user-friendly
+/// selection of genres for filtering music recommendations.
+///
+/// The genres are listed in alphabetical order and include:
+/// - Alternative
+/// - Ambient
+/// - Anime
+/// - Acoustic
+/// - Acid
+/// - Acid Jazz
+/// - Acid Punk
+/// - ... (and more)
+///
+/// The list is intended to be used in conjunction with other data structures and
+/// algorithms to provide a personalized music experience for users.
+const List<String> genres = [
   'Blues',
   'Classic Rock',
   'Country',

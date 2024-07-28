@@ -6,7 +6,11 @@ import 'atoms.dart';
 import 'exceptions.dart';
 import 'handler.dart';
 
+/// A class responsible for handling MP4 file operations.
+/// This class extends the CodecHandler class and provides methods for parsing,
+/// processing, and manipulating MP4 atoms and metadata.
 class MP4Handler extends CodecHandler {
+  /// The root atom of the MP4 file.
   late Atom _root;
 
   static const Map<String, String> _friendlyToAtomNames = {
