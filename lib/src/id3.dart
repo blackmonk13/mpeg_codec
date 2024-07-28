@@ -5,6 +5,44 @@ import 'package:archive/archive.dart';
 
 import 'handler.dart';
 
+class ID3v2Tag {
+  int version;
+  int revision;
+  int flags;
+  int size;
+  List<ID3v2Frame> frames;
+
+  ID3v2Tag(this.version, this.revision, this.flags, this.size, this.frames);
+}
+
+class ID3v2Frame {
+  String id;
+  int size;
+  Uint8List data;
+
+  ID3v2Frame(this.id, this.size, this.data);
+}
+
+class ID3Exception implements Exception {
+  final String message;
+  ID3Exception(this.message);
+
+  @override
+  String toString() => 'ID3Exception: $message';
+}
+
+final Map<String, String> _friendlyToFrameIds = {
+  'title': 'TIT2',
+  'artist': 'TPE1',
+  'album': 'TALB',
+  'year': 'TYER',
+  'track': 'TRCK',
+  'genre': 'TCON',
+  'comment': 'COMM',
+  'picture': 'APIC',
+  // Add more mappings as needed
+};
+
 class ID3Handler extends CodecHandler {
   final Map<String, Function> _customFrameHandlers = {};
   final Map<String, List<Map<String, dynamic>>> _groupedFrames = {};
