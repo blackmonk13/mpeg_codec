@@ -5,26 +5,9 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 
 import 'genres.dart';
+import 'id3tags.dart';
 import 'utils.dart';
 import 'handler.dart';
-
-class ID3v2Tag {
-  int version;
-  int revision;
-  int flags;
-  int size;
-  List<ID3v2Frame> frames;
-
-  ID3v2Tag(this.version, this.revision, this.flags, this.size, this.frames);
-}
-
-class ID3v2Frame {
-  String id;
-  int size;
-  Uint8List data;
-
-  ID3v2Frame(this.id, this.size, this.data);
-}
 
 class ID3Exception implements Exception {
   final String message;
@@ -821,13 +804,20 @@ class ID3Handler extends CodecHandler {
 
   Uint8List? _encodeMetadataValue(String key, dynamic value) {
     if (value is String) {
-      return Uint8List.fromList(
-          [0x03, ...utf8.encode(value)]); // UTF-8 encoding
+      return Uint8List.fromList([
+        0x03,
+        ...utf8.encode(value),
+      ]); // UTF-8 encoding
     } else if (value is int) {
-      return Uint8List.fromList(
-          [0x00, ...intToBytes(value, 4)]); // ISO-8859-1 encoding
+      return Uint8List.fromList([
+        0x00,
+        ...intToBytes(value, 4),
+      ]); // ISO-8859-1 encoding
     } else if (value is bool) {
-      return Uint8List.fromList([0x00, value ? 1 : 0]); // ISO-8859-1 encoding
+      return Uint8List.fromList([
+        0x00,
+        value ? 1 : 0,
+      ]); // ISO-8859-1 encoding
     } else if (value is List<int> && value.length == 2) {
       // For numeric pairs like track number or disk number
       return Uint8List.fromList([
@@ -846,7 +836,8 @@ class ID3Handler extends CodecHandler {
       ]);
     } else {
       logger.w(
-          'Unsupported metadata value type: ${value.runtimeType} for key: $key');
+        'Unsupported metadata value type: ${value.runtimeType} for key: $key',
+      );
       return null;
     }
   }
