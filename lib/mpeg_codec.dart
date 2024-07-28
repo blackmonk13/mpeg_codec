@@ -31,3 +31,4 @@ export 'src/handler.dart';
 export 'src/id3.dart';
 export 'src/metadata.dart';
 export 'src/mp4.dart';
+export 'src/utils.dart';

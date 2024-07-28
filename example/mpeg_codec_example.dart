@@ -1,9 +1,7 @@
 import 'dart:io';
-import 'package:mpeg_codec/src/id3.dart';
-import 'package:mpeg_codec/src/utils.dart';
-import 'package:path/path.dart' as path;
 
 import 'package:mpeg_codec/mpeg_codec.dart';
+import 'package:path/path.dart' as path;
 
 void main(List<String> args) async {
   if (args.isEmpty) {
@@ -48,9 +46,13 @@ Future<void> handleMp3(String filePath) async {
   }
 
   // Queue multiple operations
-  handler.addMetadata({'title': 'New Title', 'artist': 'Artist'});
+  handler.addMetadata({
+    'title': 'New Title',
+    'artist': 'Artist',
+  });
   // handler.updateMetadata({'genre': 'New Genre'});
   // handler.removeMetadata(['artist']);
+
   try {
     // Apply all queued changes at once
     await handler.applyMetadataChanges();
@@ -78,15 +80,20 @@ Future<void> handleMp4(String filePath) async {
   }
 
   // Queue multiple operations
-  // handler.addMetadata({'title': 'New Title', 'artist': 'Artist'});
-  // handler.updateMetadata({'genre': 'New Genre'});
-  // handler.removeMetadata(['artist']);
-  // try {
-  //   // Apply all queued changes at once
-  //   await handler.applyMetadataChanges();
-  //   print('Metadata changes applied successfully');
-  // } catch (e) {
-  //   print('Failed to apply metadata changes: $e');
-  // }
+  handler.addMetadata({
+    'title': 'New Title',
+    'artist': 'Artist',
+  });
+  handler.updateMetadata({'genre': 'New Genre'});
+  handler.removeMetadata(['artist']);
+  
+  try {
+    // Apply all queued changes at once
+    await handler.applyMetadataChanges();
+    print('Metadata changes applied successfully');
+  } catch (e) {
+    print('Failed to apply metadata changes: $e');
+  }
+
   print("Elapsed MP4 time: ${formatDuration(stopwatch.elapsed)}");
 }

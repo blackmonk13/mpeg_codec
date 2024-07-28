@@ -5,7 +5,7 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 
 import 'genres.dart';
-import 'id3tags.dart';
+import 'id3_tags.dart';
 import 'utils.dart';
 import 'handler.dart';
 
@@ -829,8 +829,10 @@ class ID3Handler extends CodecHandler {
       String mimeType = _getMimeType(value);
       return Uint8List.fromList([
         0x00, // Text encoding (ISO-8859-1)
+        // ignore: unnecessary_string_escapes
         ...ascii.encode('$mimeType\0'), // MIME type
         0x03, // Picture type (0x03 = front cover)
+        // ignore: unnecessary_string_escapes
         ...ascii.encode('Cover\0'), // Description
         ...value // Picture data
       ]);
