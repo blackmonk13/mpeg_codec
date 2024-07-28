@@ -4,7 +4,6 @@ import 'dart:typed_data';
 
 import 'atoms.dart';
 import 'exceptions.dart';
-import 'genres.dart';
 import 'handler.dart';
 
 class MP4Handler extends CodecHandler {
@@ -538,31 +537,14 @@ class MP4Handler extends CodecHandler {
   String _decodeGenre(Uint8List value) {
     if (value.length == 2) {
       final genreId = value[1];
-      return _getGenreById(genreId);
+      return getGenreById(genreId);
     } else {
       // If it's not a numeric genre, it's likely a string
       return utf8.decode(value);
     }
   }
 
-  /// Retrieves the genre string associated with the given genre ID.
-  ///
-  /// If the genre ID is within the valid range (0 to [genres.length] - 1),
-  /// the function returns the corresponding genre string from the [genres] list.
-  /// Otherwise, it returns 'Unknown'.
-  ///
-  /// Parameters:
-  /// - id: The genre ID to retrieve the genre string for.
-  ///
-  /// Returns:
-  /// - A string representing the genre associated with the given genre ID.
-  String _getGenreById(int id) {
-    if (id >= 0 && id < genres.length) {
-      return genres[id];
-    } else {
-      return 'Unknown';
-    }
-  }
+  
 
   /// Decodes a byte list into a value based on the given data type.
   ///

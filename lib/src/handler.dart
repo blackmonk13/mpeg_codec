@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:logger/logger.dart';
 
+import 'genres.dart';
 import 'metadata.dart';
 
 enum OperationType { add, update, remove }
@@ -52,6 +53,25 @@ abstract class CodecHandler {
 
   /// Parses the metadata from the file.
   void parseMetadata();
+
+  /// Retrieves the genre string associated with the given genre ID.
+  ///
+  /// If the genre ID is within the valid range (0 to [genres.length] - 1),
+  /// the function returns the corresponding genre string from the [genres] list.
+  /// Otherwise, it returns 'Unknown'.
+  ///
+  /// Parameters:
+  /// - id: The genre ID to retrieve the genre string for.
+  ///
+  /// Returns:
+  /// - A string representing the genre associated with the given genre ID.
+  String getGenreById(int id) {
+    if (id >= 0 && id < genres.length) {
+      return genres[id];
+    } else {
+      return 'Unknown';
+    }
+  }
 
   /// Gets the metadata associated with the given key.
   ///
