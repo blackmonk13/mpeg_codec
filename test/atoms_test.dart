@@ -2,11 +2,18 @@ import 'dart:typed_data';
 import 'package:mpeg_codec/src/atoms.dart';
 import 'package:test/test.dart';
 
-void printAtomTree(Atom atom, [String indent = '']) {
-  print('$indent${atom.toString()}');
+List<String> printAtomTree(Atom atom, [String indent = '']) {
+  List<String> output = [];
+  output.add('$indent${atom.toString()}');
   for (var child in atom.children) {
-    printAtomTree(child, '$indent  ');
+    output.addAll(printAtomTree(child, '$indent  '));
   }
+
+  if (indent.isEmpty) {
+    print(output.join("\n"));
+  }
+
+  return output;
 }
 
 void main() {

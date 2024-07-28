@@ -98,11 +98,18 @@ class MP4Handler extends CodecHandler {
     return root;
   }
 
-  void printAtomTree(Atom atom, [String indent = '']) {
-    print('$indent${atom.toString()}');
+  List<String> printAtomTree(Atom atom, [String indent = '']) {
+    List<String> output = [];
+    output.add('$indent${atom.toString()}');
     for (var child in atom.children) {
-      printAtomTree(child, '$indent  ');
+      output.addAll(printAtomTree(child, '$indent  '));
     }
+
+    if (indent.isEmpty) {
+      logger.i(output.join("\n"));
+    }
+
+    return output;
   }
 
   /// Parses the MP4 atoms from the given [start] offset to the [end] offset.
@@ -544,8 +551,6 @@ class MP4Handler extends CodecHandler {
     }
   }
 
-  
-
   /// Decodes a byte list into a value based on the given data type.
   ///
   /// Parameters:
@@ -793,7 +798,7 @@ class MP4Handler extends CodecHandler {
     }
 
     outputFile.setPositionSync(offset);
-    outputFile.writeFromSync(_intToBytes(atom.size, 4));
+    outputFile.writeFromSync(intToBytes(atom.size, 4));
     outputFile.writeFromSync(atom.type.codeUnits);
 
     int dataOffset = offset + 8;
@@ -851,19 +856,7 @@ class MP4Handler extends CodecHandler {
     close();
   }
 
-  /// Converts an integer to a byte array.
-  ///
-  /// Parameters:
-  /// - [value]: The integer to convert.
-  /// - [byteCount]: The number of bytes in the resulting array.
-  ///
-  /// Returns:
-  ///   A [Uint8List] containing the bytes of the given integer in big-endian
-  ///   order.
-  Uint8List _intToBytes(int value, int byteCount) {
-    final bytes = ByteData(byteCount)..setUint32(0, value, Endian.big);
-    return bytes.buffer.asUint8List();
-  }
+  
 
   /// Encodes a metadata atom for the given key and value into an [Atom] object.
   ///
@@ -942,13 +935,13 @@ class MP4Handler extends CodecHandler {
     if (value is String) {
       return Uint8List.fromList(utf8.encode(value));
     } else if (value is int) {
-      return _intToBytes(value, 4);
+      return intToBytes(value, 4);
     } else if (value is bool) {
       return Uint8List.fromList([value ? 1 : 0]);
     } else if (value is List<int> && value.length == 2) {
       // For numeric pairs like track number or disk number
       return Uint8List.fromList(
-          [0, 0, ...value.expand((i) => _intToBytes(i, 2))]);
+          [0, 0, ...value.expand((i) => intToBytes(i, 2))]);
     } else {
       throw MP4Exception(
         'Unsupported metadata value type: ${value.runtimeType}',
