@@ -59,15 +59,37 @@ String _frameIdToKey(String frameId) {
       .key;
 }
 
+/// A class to handle ID3 tag operations.
+///
+/// This class provides methods for reading, writing, and manipulating ID3 tags in various formats.
+/// It supports ID3v1, ID3v2, and APEv2 tag formats.
 class ID3Handler extends CodecHandler {
+  /// The ID3v2 tag being handled.
   late ID3v2Tag _id3v2Tag;
+
+  /// A map of custom frame handlers for handling unknown or unsupported frames.
   final Map<String, Function> _customFrameHandlers = {};
+
+  /// A map of grouped frames, used for storing frames that are part of a group.
   final Map<String, List<Map<String, dynamic>>> _groupedFrames = {};
 
   ID3Handler(super.filePath) {
     parseMetadata();
   }
 
+  /// Registers a custom frame handler for a specific ID3v2 frame.
+  ///
+  /// This function allows you to define custom logic for parsing and handling
+  /// specific ID3v2 frames. When an ID3v2 tag is parsed, if a handler is registered
+  /// for a particular frame ID, the handler will be called instead of the default
+  /// parsing logic.
+  ///
+  /// The [frameId] parameter is the ID of the ID3v2 frame for which the handler should
+  /// be registered. The [handler] parameter is a function that takes a [Uint8List]
+  /// representing the raw frame data and returns a custom object representing the
+  /// parsed frame data.
+  ///
+  /// The function does not return any value.
   void registerCustomFrameHandler(String frameId, Function handler) {
     _customFrameHandlers[frameId] = handler;
   }
@@ -87,6 +109,18 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Parses an ID3v2 tag from the given file.
+  ///
+  /// The function reads the file's header and checks if it's a valid ID3v2 tag.
+  /// If the tag is valid, it parses the tag's version, revision, flags, size,
+  /// and the list of frames it contains.
+  ///
+  /// If the tag contains an extended header, it parses the extended header.
+  /// It then parses the frames, handling unsynchronization if present.
+  ///
+  /// If the tag contains a footer, it parses the footer.
+  ///
+  /// The function returns an [ID3v2Tag] object containing the parsed tag's information.
   ID3v2Tag _parseID3v2() {
     file.setPositionSync(0);
     var header = file.readSync(10);
@@ -133,6 +167,18 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Parses the ID3v2 extended header based on the given version.
+  ///
+  /// This function extracts the size of the extended header and returns it.
+  /// If the version is 3, it also parses the ID3v2.3 extended header.
+  /// If the version is 4, it also parses the ID3v2.4 extended header.
+  ///
+  /// Parameters:
+  /// - [data]: The byte data containing the extended header.
+  /// - [version]: The version of the ID3v2 tag (3 or 4).
+  ///
+  /// Returns:
+  /// - The size of the extended header, including the header size.
   int _parseExtendedHeader(Uint8List data, int version) {
     if (version == 3) {
       int size = ByteData.view(data.buffer).getUint32(0);
@@ -146,6 +192,16 @@ class ID3Handler extends CodecHandler {
     return 0;
   }
 
+  /// Parses the ID3v2 footer from the given [footer] data.
+  ///
+  /// The function checks if the footer starts with the '3DI' identifier, indicating an ID3v2.4 footer.
+  /// If found, it extracts and logs the version and revision numbers, as well as the total size of the footer.
+  ///
+  /// Parameters:
+  /// - [footer]: A [Uint8List] containing the footer data to be parsed.
+  ///
+  /// Returns:
+  /// - Nothing.
   void _parseID3v2Footer(Uint8List footer) {
     if (String.fromCharCodes(footer.sublist(0, 3)) == '3DI') {
       logger.i('ID3v2.4 footer found');
@@ -158,9 +214,21 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Parses ID3v2 frames from the given data.
+  ///
+  /// This function iterates through the data, extracting each frame and parsing its content.
+  /// It handles different frame types, including standard and custom frames.
+  ///
+  /// Parameters:
+  /// - [data]: The byte data containing the ID3v2 frames.
+  /// - [version]: The version of the ID3v2 tag (2 or 4).
+  ///
+  /// Returns:
+  /// A list of [ID3v2Frame] objects, each representing a parsed frame.
   List<ID3v2Frame> _parseID3v2Frames(Uint8List data, int version) {
     List<ID3v2Frame> frames = [];
     int offset = 0;
+
     while (offset < data.length) {
       if (offset + 10 > data.length) {
         logger.w('Unexpected end of ID3v2 tag data');
@@ -197,6 +265,16 @@ class ID3Handler extends CodecHandler {
     return frames;
   }
 
+  /// Parses an ID3v2 frame.
+  ///
+  /// This function handles the parsing of ID3v2 frames, including handling of
+  /// frame flags, decompression of compressed frames, and handling of custom
+  /// frame handlers.
+  ///
+  /// Parameters:
+  /// - [frame]: The ID3v2 frame to be parsed.
+  /// - [frameFlags]: The flags associated with the frame.
+  /// - [version]: The version of the ID3v2 tag.
   void _parseID3v2Frame(ID3v2Frame frame, int frameFlags, int version) {
     bool dataLengthIndicator = (frameFlags & 0x0001) != 0;
     bool compressed = (frameFlags & 0x0008) != 0;
@@ -238,6 +316,14 @@ class ID3Handler extends CodecHandler {
     _parseStandardFrame(frame.id, decompressedData);
   }
 
+  /// Parses a standard ID3v2 frame.
+  ///
+  /// This function handles the parsing of various standard ID3v2 frames, such as text frames,
+  /// user-defined text frames, comment frames, attached picture frames, unsynchronized lyrics frames,
+  /// synchronized lyrics frames, chapter frames, table of contents frames, and private frames.
+  ///
+  /// [frameId] The ID of the frame to be parsed.
+  /// [data] The raw data of the frame.
   void _parseStandardFrame(String frameId, Uint8List data) {
     switch (frameId) {
       case 'TIT2':
@@ -280,6 +366,16 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Handles grouped frames in ID3v2 tag.
+  ///
+  /// This function extracts the group ID and the data associated with the group from the given
+  /// [data] and adds it to the list of grouped frames for the given [frameId]. If the list for the
+  /// given [frameId] does not exist, it is created.
+  ///
+  /// Parameters:
+  /// - [frameId]: The ID of the frame containing the grouped data.
+  /// - [data]: The raw data of the grouped frame.
+  /// - [version]: The version of the ID3v2 tag.
   void _handleGroupedFrame(String frameId, Uint8List data, int version) {
     int groupId = data[0];
     var frameData = data.sublist(1);
@@ -294,6 +390,14 @@ class ID3Handler extends CodecHandler {
     });
   }
 
+  /// Parses the ID3v2 synchronized lyrics frame.
+  ///
+  /// This function extracts the language, time stamp format, content type, description,
+  /// and synchronized lyrics from the given [data] and sets the corresponding metadata.
+  ///
+  /// Parameters:
+  /// - [data]: The raw data of the synchronized lyrics frame.
+  /// - [version]: The version of the ID3v2 tag.
   void _parseSynchronizedLyricsFrame(Uint8List data, int version) {
     int encoding = data[0];
     String language = String.fromCharCodes(data.sublist(1, 4));
@@ -327,6 +431,15 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Parses the ID3v2 chapter frame.
+  ///
+  /// This function extracts the chapter element ID, start and end times, start and end offsets,
+  /// and sub-frames from the given [data] and [version]. It then sets the extracted information
+  /// as metadata with the key 'chapter_{elementId}'.
+  ///
+  /// Parameters:
+  /// - [data]: The byte data containing the chapter frame.
+  /// - [version]: The version of the ID3v2 tag.
   void _parseChapterFrame(Uint8List data, int version) {
     int elementIdEnd = data.indexOf(0);
     String elementId = String.fromCharCodes(data.sublist(0, elementIdEnd));
@@ -351,6 +464,14 @@ class ID3Handler extends CodecHandler {
     setMetadata('chapter_$elementId', chapterInfo);
   }
 
+  /// Parses the ID3v2 table of contents (TOC) frame.
+  ///
+  /// This function extracts the element ID, flags, entry count, child IDs, and sub-frames from the given [data] and [version].
+  /// It then sets the extracted information as metadata with the key 'tableOfContents_{elementId}'.
+  ///
+  /// Parameters:
+  /// - [data]: The byte data containing the TOC frame.
+  /// - [version]: The version of the ID3v2 tag.
   void _parseTableOfContentsFrame(Uint8List data, int version) {
     int elementIdEnd = data.indexOf(0);
     String elementId = String.fromCharCodes(data.sublist(0, elementIdEnd));
@@ -375,6 +496,15 @@ class ID3Handler extends CodecHandler {
     setMetadata('tableOfContents_$elementId', tocInfo);
   }
 
+  /// Parses the ID3v2 private frame and sets the corresponding metadata.
+  ///
+  /// The private frame contains binary data that is not intended to be interpreted by the ID3 standard.
+  ///
+  /// Parameters:
+  /// - [data]: A [Uint8List] containing the binary data of the private frame.
+  ///
+  /// The function extracts the owner identifier and the private data from the frame.
+  /// It then sets the metadata with the key 'private_$ownerId' and the value as the private data.
   void _parsePrivateFrame(Uint8List data) {
     int ownerIdEnd = data.indexOf(0);
     String ownerId = String.fromCharCodes(data.sublist(0, ownerIdEnd));
@@ -382,6 +512,14 @@ class ID3Handler extends CodecHandler {
     setMetadata('private_$ownerId', privateData);
   }
 
+  /// Parses a text frame from the ID3v2 tag.
+  ///
+  /// The function decodes the text frame data based on the specified frame ID and encoding.
+  /// It then extracts the relevant information and sets it as metadata.
+  ///
+  /// Parameters:
+  /// - [frameId]: A string representing the ID of the text frame.
+  /// - [data]: A [Uint8List] containing the binary data of the text frame.
   void _parseTextFrame(String frameId, Uint8List data) {
     String text = _decodeTextFrame(data);
     String key = _frameIdToKey(frameId);
@@ -399,6 +537,18 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Parses a user-defined text frame from the ID3v2 tag.
+  ///
+  /// This function extracts the encoding, description, and value from the given data.
+  /// It then sets the metadata with the key 'userDefinedText' and the extracted information.
+  ///
+  /// Parameters:
+  /// - [data]: A [Uint8List] containing the binary data of the user-defined text frame.
+  ///
+  /// The encoding is determined by the first byte of the data.
+  /// The description and value are split by null terminators.
+  ///
+  /// The function does not return any value.
   void _parseUserDefinedTextFrame(Uint8List data) {
     int encoding = data[0];
     List<Uint8List> parts = _splitNullTerminated(data.sublist(1), encoding);
@@ -406,10 +556,26 @@ class ID3Handler extends CodecHandler {
       String description = _decodeString(parts[0], encoding);
       String value = _decodeString(parts[1], encoding);
       setMetadata(
-          'userDefinedText', {'description': description, 'value': value});
+        'userDefinedText',
+        {
+          'description': description,
+          'value': value,
+        },
+      );
     }
   }
 
+  /// Decodes the text frame data based on the specified encoding.
+  ///
+  /// Parameters:
+  /// - [data]: A [Uint8List] containing the binary data of the text frame.
+  ///
+  /// Returns:
+  /// A [String] representing the decoded text.
+  ///
+  /// The function decodes the text frame data based on the specified frame ID and encoding.
+  /// It then extracts the relevant information and returns it as a string.
+  /// If the encoding is unknown, it logs a warning and returns the decoded text using ISO-8859-1 encoding.
   String _decodeTextFrame(Uint8List data) {
     if (data.isEmpty) return '';
     int encoding = data[0];
@@ -430,6 +596,19 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Decodes the UTF-16 encoded data.
+  ///
+  /// The function checks for a Byte Order Mark (BOM) at the beginning of the data.
+  /// If a BOM is found, it determines the endianness of the data and decodes it accordingly.
+  /// If no BOM is found, it assumes the data is encoded in big-endian order.
+  ///
+  /// The function trims any trailing whitespace from the decoded string.
+  ///
+  /// Parameters:
+  /// - [data]: A [Uint8List] containing the UTF-16 encoded data.
+  ///
+  /// Returns:
+  /// A [String] representing the decoded UTF-16 data.
   String _decodeUTF16(Uint8List data) {
     if (data.length < 2) return '';
     Uint8List bom = data.sublist(0, 2);
@@ -442,6 +621,13 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Parses the comment frame data and sets the corresponding metadata.
+  ///
+  /// The comment frame contains information about the comment, such as the language and text.
+  /// This function decodes the comment frame data using the specified encoding and sets the metadata accordingly.
+  ///
+  /// Parameters:
+  /// - [data]: A [Uint8List] containing the comment frame data.
   void _parseCommentFrame(Uint8List data) {
     int encoding = data[0];
     String language = String.fromCharCodes(data.sublist(1, 4));
@@ -458,6 +644,13 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Parses the APIC (Attached Picture) frame data and sets the corresponding metadata.
+  ///
+  /// The APIC frame contains information about the attached picture, such as the MIME type, picture type, description, and picture data.
+  /// This function decodes the APIC frame data using the specified encoding and sets the metadata accordingly.
+  ///
+  /// Parameters:
+  /// - [data]: A [Uint8List] containing the APIC frame data.
   void _parseAPICFrame(Uint8List data) {
     int encoding = data[0];
     int mimeTypeEnd = data.indexOf(0, 1);
@@ -475,6 +668,13 @@ class ID3Handler extends CodecHandler {
     });
   }
 
+  /// Parses the Unsynchronized Lyrics (USLT) frame data and sets the corresponding metadata.
+  ///
+  /// The USLT frame contains unsynchronized lyrics, such as lyrics that are not synchronized with the audio.
+  /// This function decodes the USLT frame data using the specified encoding and sets the metadata accordingly.
+  ///
+  /// Parameters:
+  /// - [data]: A [Uint8List] containing the USLT frame data.
   void _parseUnsynchronizedLyricsFrame(Uint8List data) {
     int encoding = data[0];
     String language = String.fromCharCodes(data.sublist(1, 4));
@@ -491,6 +691,20 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Splits the given [data] into a list of sublists based on null terminators.
+  ///
+  /// The function iterates through the [data] starting from index [start].
+  /// It finds the next null terminator based on the specified [encoding].
+  /// It then adds the sublist from [start] to the null terminator to the [result] list.
+  /// The function continues this process until it has iterated through the entire [data].
+  ///
+  /// Parameters:
+  /// - [data]: The input data to be split.
+  /// - [start]: The starting index for splitting.
+  /// - [encoding]: The encoding of the data (0: ISO-8859-1, 1: UTF-16 with BOM, 2: UTF-16 without BOM, 3: UTF-8).
+  ///
+  /// Returns:
+  /// A list of sublists, where each sublist represents a part of the [data] split by null terminators.
   List<Uint8List> _splitNullTerminated(Uint8List data, int encoding) {
     List<Uint8List> result = [];
     int start = 0;
@@ -502,6 +716,21 @@ class ID3Handler extends CodecHandler {
     return result;
   }
 
+  /// Finds the index of the next null terminator in the given [data] starting from [start].
+  ///
+  /// The function supports different encoding types:
+  /// - 0: ISO-8859-1
+  /// - 1: UTF-16 with BOM
+  /// - 2: UTF-16 without BOM
+  /// - 3: UTF-8
+  ///
+  /// Parameters:
+  /// - data: The input data to search for the null terminator.
+  /// - start: The starting index for searching.
+  /// - encoding: The encoding type of the data.
+  ///
+  /// Returns:
+  /// The index of the next null terminator in the [data], or the length of the [data] if no null terminator is found.
   int _findNullTerminator(Uint8List data, int start, int encoding) {
     if (encoding == 1 || encoding == 2) {
       for (int i = start; i < data.length - 1; i += 2) {
@@ -513,6 +742,17 @@ class ID3Handler extends CodecHandler {
     return data.length;
   }
 
+  /// Removes unsynchronization bytes from the given [data].
+  ///
+  /// Unsynchronization bytes are used in ID3v2 tags to prevent the parser from
+  /// interpreting data as a new frame. This function removes these bytes from the
+  /// [data] to ensure accurate parsing.
+  ///
+  /// Parameters:
+  /// - [data]: The input data from which to remove unsynchronization bytes.
+  ///
+  /// Returns:
+  /// A new [Uint8List] containing the [data] with unsynchronization bytes removed.
   Uint8List _removeUnsynchronization(Uint8List data) {
     ByteData result = ByteData(data.length);
     int writeIndex = 0;
@@ -528,6 +768,24 @@ class ID3Handler extends CodecHandler {
     return result.buffer.asUint8List(0, writeIndex);
   }
 
+  /// Decodes a string from the given [data] using the specified [encoding].
+  ///
+  /// The [encoding] parameter can have the following values:
+  /// - 0: ISO-8859-1 encoding
+  /// - 1: UTF-16 encoding with BOM
+  /// - 2: UTF-16 encoding without BOM
+  /// - 3: UTF-8 encoding
+  ///
+  /// The function returns the decoded string.
+  ///
+  /// If the [encoding] is not recognized, the function defaults to ISO-8859-1 encoding.
+  ///
+  /// Parameters:
+  /// - [data]: The input data to decode.
+  /// - [encoding]: The encoding type of the input data.
+  ///
+  /// Returns:
+  /// The decoded string.
   String _decodeString(Uint8List data, int encoding) {
     switch (encoding) {
       case 0:
@@ -543,47 +801,97 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Converts the given 4-byte [data] into a single integer using the sync-safe integer encoding.
+  ///
+  /// The sync-safe integer encoding is used in ID3v2 tags to prevent the parser from interpreting data as a new frame.
+  ///
+  /// The function shifts the bytes of the [data] to the left by the appropriate number of bits and then performs a bitwise OR operation.
+  ///
+  /// Parameters:
+  /// - [data]: A [Uint8List] containing the 4-byte data to be converted.
+  ///
+  /// Returns:
+  /// - An [int] representing the converted sync-safe integer.
   int _syncSafeInteger(Uint8List data) {
     return (data[0] << 21) | (data[1] << 14) | (data[2] << 7) | data[3];
   }
 
+  /// Parses the ID3v1 tag from the end of the file.
+  ///
+  /// The function reads the last 128 bytes of the file and checks if they contain an ID3v1 tag.
+  /// If an ID3v1 tag is found, the function extracts and stores the metadata (title, artist, album, year, track, comment, and genre) from the tag.
   void _parseID3v1() {
     file.setPositionSync(file.lengthSync() - 128);
     Uint8List tagData = file.readSync(128);
+
+    // Check if the first three bytes of the tagData are 'TAG'
     if (String.fromCharCodes(tagData.sublist(0, 3)) == 'TAG') {
       logger.i('Found ID3v1 tag');
+
+      // Extract and store the title metadata
       setMetadata('title',
           _trimNullTerminator(_decodeString(tagData.sublist(3, 33), 0)));
+
+      // Extract and store the artist metadata
       setMetadata('artist',
           _trimNullTerminator(_decodeString(tagData.sublist(33, 63), 0)));
+
+      // Extract and store the album metadata
       setMetadata('album',
           _trimNullTerminator(_decodeString(tagData.sublist(63, 93), 0)));
+
+      // Extract and store the year metadata
       setMetadata('year',
           _trimNullTerminator(_decodeString(tagData.sublist(93, 97), 0)));
 
       // Check for ID3v1.1 (looking for a zero byte at position 125)
       if (tagData[125] == 0) {
+        // Extract and store the track metadata
         setMetadata('track', tagData[126]);
+
+        // Extract and store the comment metadata
         setMetadata('comment',
             _trimNullTerminator(_decodeString(tagData.sublist(97, 125), 0)));
       } else {
+        // Extract and store the comment metadata
         setMetadata('comment',
             _trimNullTerminator(_decodeString(tagData.sublist(97, 127), 0)));
       }
 
+      // Extract and store the genre metadata
       setMetadata('genre', getGenreById(tagData[127]));
     }
   }
 
+  /// Trims the null terminator from the given string.
+  ///
+  /// If the input string contains a null terminator ('\x00'), this function will
+  /// return a substring up to the null terminator. If the input string does not
+  /// contain a null terminator, the function will return the entire input string.
+  ///
+  /// Parameters:
+  /// - [input]: The input string to trim.
+  ///
+  /// Returns:
+  /// A string with the null terminator removed, or the entire input string if
+  /// no null terminator was found.
   String _trimNullTerminator(String input) {
     int nullIndex = input.indexOf('\x00');
     return nullIndex != -1 ? input.substring(0, nullIndex) : input;
   }
 
+  /// Parses the APEv2 tag from the end of the file.
+  ///
+  /// The function reads the last 32 bytes of the file and checks if they contain an APEv2 tag.
+  /// If an APEv2 tag is found, the function extracts and stores the metadata (key-value pairs) from the tag.
+  ///
+  /// If an error occurs during parsing, the function logs the error message.
   void _parseAPEv2() {
     try {
       file.setPositionSync(file.lengthSync() - 32);
       Uint8List footer = file.readSync(32);
+
+      // Check if the first eight bytes of the tagData are 'APETAGEX'
       if (String.fromCharCodes(footer.sublist(0, 8)) == 'APETAGEX') {
         int size = ByteData.view(footer.buffer).getUint32(12, Endian.little);
         int itemCount =
@@ -621,6 +929,12 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Parses the Vorbis comments from the Ogg stream.
+  ///
+  /// This function reads the Ogg stream from the current position and extracts the
+  /// Vorbis comments. The comments are then stored in the metadata map.
+  ///
+  /// If an error occurs during parsing, the error message is logged using the logger.
   void _parseVorbisComments() {
     try {
       file.setPositionSync(0);
@@ -661,6 +975,14 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Finds the second Ogg page in the file.
+  ///
+  /// This function reads the Ogg stream from the current position and searches for
+  /// the second Ogg page. If the second Ogg page is found, the file position is
+  /// updated to the start of the second page. If the second Ogg page is not found,
+  /// an exception is thrown.
+  ///
+  /// @throws Exception if the second Ogg page is not found.
   void _findSecondOggPage() {
     int pageCount = 0;
     while (pageCount < 2) {
@@ -696,6 +1018,20 @@ class ID3Handler extends CodecHandler {
     logger.d('File written successfully to: $outputPath');
   }
 
+  /// Writes the ID3v2 tag to the output file.
+  ///
+  /// The function writes the ID3v2 tag to the output file in the following steps:
+  /// 1. Writes the ID3v2 tag header, including the 'ID3' signature, version, and flags.
+  /// 2. Writes a placeholder for the tag size.
+  /// 3. Stores the current position in the file as the start position of the tag.
+  /// 4. Iterates through each frame in the ID3v2 tag and writes the frame to the file.
+  /// 5. Calculates the end position of the tag in the file.
+  /// 6. Calculates the tag size by subtracting the start position from the end position.
+  /// 7. Writes the tag size to the placeholder position in the file.
+  /// 8. Moves the file position to the end position of the tag.
+  ///
+  /// @param outputFile The output file to write the ID3v2 tag to.
+  /// @return A future that completes when the ID3v2 tag has been written to the file.
   Future<void> _writeID3v2Tag(RandomAccessFile outputFile) async {
     outputFile.setPositionSync(0);
     outputFile.writeFromSync(utf8.encode('ID3'));
@@ -718,6 +1054,17 @@ class ID3Handler extends CodecHandler {
     outputFile.setPositionSync(endPosition);
   }
 
+  /// Writes an ID3v2 frame to the output file.
+  ///
+  /// This function writes an ID3v2 frame to the output file in the following steps:
+  /// 1. Writes the frame ID (four ASCII characters).
+  /// 2. Writes the frame size (32-bit synchsafe integer).
+  /// 3. Writes the frame flags (16-bit integer).
+  /// 4. Writes the frame data.
+  ///
+  /// @param outputFile The output file to write the ID3v2 frame to.
+  /// @param frame The ID3v2 frame to write.
+  /// @return A future that completes when the ID3v2 frame has been written to the file.
   Future<void> _writeFrame(
     RandomAccessFile outputFile,
     ID3v2Frame frame,
@@ -728,6 +1075,14 @@ class ID3Handler extends CodecHandler {
     outputFile.writeFromSync(frame.data);
   }
 
+  /// Copies the audio data from the current position in the original file to the output file.
+  ///
+  /// This function reads the audio data from the original file, starting from the position
+  /// after the ID3v2 tag, and writes it to the output file. The function uses a buffer of 5 MB
+  /// to read and write the data in chunks.
+  ///
+  /// @param outputFile The output file to write the audio data to.
+  /// @return A future that completes when the audio data has been copied to the output file.
   Future<void> _copyAudioData(RandomAccessFile outputFile) async {
     openRead();
     file.setPositionSync(_id3v2Tag.size);
@@ -743,6 +1098,20 @@ class ID3Handler extends CodecHandler {
     close();
   }
 
+  /// Writes the ID3v1 tag to the output file.
+  ///
+  /// The function writes the ID3v1 tag to the output file in the following steps:
+  /// 1. Writes the tag header, including the 'TAG' signature.
+  /// 2. Writes the title (30 bytes) of the metadata.
+  /// 3. Writes the artist (30 bytes) of the metadata.
+  /// 4. Writes the album (30 bytes) of the metadata.
+  /// 5. Writes the year (4 bytes) of the metadata.
+  /// 6. Writes the comment (28 or 30 bytes) of the metadata. If the track number is available,
+  ///    it writes the comment in ID3v1.1 format with a track number at the end.
+  /// 7. Writes the genre (1 byte) of the metadata. If the genre is not found in the predefined list,
+  ///    it writes 255 (unknown genre).
+  ///
+  /// @param outputFile The output file to write the ID3v1 tag to.
   Future<void> _writeID3v1Tag(RandomAccessFile outputFile) async {
     outputFile.setPositionSync(outputFile.lengthSync());
     outputFile.writeFromSync(utf8.encode('TAG'));
@@ -781,6 +1150,20 @@ class ID3Handler extends CodecHandler {
     outputFile.writeFromSync([genreId >= 0 ? genreId : 255]);
   }
 
+  /// Encodes the given metadata [value] into an ID3v2 frame with the specified [key].
+  ///
+  /// The function uses the [key] to look up the corresponding frame ID in the `_friendlyToFrameIds` map.
+  /// It then calls the `_encodeMetadataValue` function to encode the [value] into a byte list.
+  /// If the encoded value is `null`, the function logs a warning message and returns `null`.
+  /// Otherwise, it creates an `ID3v2Frame` object with the frame ID, data length, and encoded data,
+  /// and returns the frame.
+  ///
+  /// Parameters:
+  /// - [key]: The metadata key.
+  /// - [value]: The metadata value to be encoded.
+  ///
+  /// Returns:
+  /// - An `ID3v2Frame` object containing the encoded metadata, or `null` if the encoding fails.
   ID3v2Frame? encodeMetadataFrame(String key, dynamic value) {
     final frameId = _friendlyToFrameIds[key] ?? key;
     final encodedValue = _encodeMetadataValue(key, value);
@@ -794,6 +1177,18 @@ class ID3Handler extends CodecHandler {
     return ID3v2Frame(frameId, frameData.length, frameData);
   }
 
+  /// Pads or truncates the given [text] to the specified [length].
+  ///
+  /// If the length of the [text] is greater than the specified [length], the function
+  /// truncates the text to the specified length. If the length of the [text] is less than
+  /// the specified [length], the function pads the text with zeros to the specified length.
+  ///
+  /// Parameters:
+  /// - [text]: The input text to be padded or truncated.
+  /// - [length]: The desired length of the output text.
+  ///
+  /// Returns:
+  /// - A [Uint8List] containing the padded or truncated text.
   Uint8List _padOrTruncate(String text, int length) {
     if (text.length > length) {
       return Uint8List.fromList(utf8.encode(text.substring(0, length)));
@@ -802,6 +1197,20 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Encodes the given metadata [value] into an ID3v2 frame with the specified [key].
+  ///
+  /// The function uses the [key] to look up the corresponding frame ID in the `_friendlyToFrameIds` map.
+  /// It then calls the `_encodeMetadataValue` function to encode the [value] into a byte list.
+  /// If the encoded value is `null`, the function logs a warning message and returns `null`.
+  /// Otherwise, it creates an `ID3v2Frame` object with the frame ID, data length, and encoded data,
+  /// and returns the frame.
+  ///
+  /// Parameters:
+  /// - [key]: The metadata key.
+  /// - [value]: The metadata value to be encoded.
+  ///
+  /// Returns:
+  /// - An `ID3v2Frame` object containing the encoded metadata, or `null` if the encoding fails.
   Uint8List? _encodeMetadataValue(String key, dynamic value) {
     if (value is String) {
       return Uint8List.fromList([
@@ -885,6 +1294,22 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Adds or updates the metadata for the given [key] with the provided [value].
+  ///
+  /// This function first looks up the corresponding frame ID in the `_friendlyToFrameIds` map.
+  /// If the frame ID is not found, it uses the [key] as the frame ID.
+  /// It then encodes the [value] into an ID3v2 frame using the `encodeMetadataFrame` function.
+  /// If the encoding fails, it throws an `ID3Exception`.
+  ///
+  /// If the frame ID already exists in the ID3v2 tag, it updates the existing frame with the new encoded frame.
+  /// Otherwise, it adds the encoded frame to the ID3v2 tag.
+  ///
+  /// Parameters:
+  /// - [key]: The metadata key.
+  /// - [value]: The metadata value to be encoded.
+  ///
+  /// Throws:
+  /// - `ID3Exception`: If the encoding fails.
   void _addOrUpdateMetadata(String key, dynamic value) {
     final frameId = _friendlyToFrameIds[key] ?? key;
     final encodedFrame = encodeMetadataFrame(key, value);
@@ -902,16 +1327,36 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Removes the metadata associated with the given [key] from the ID3v2 tag.
+  ///
+  /// This function first looks up the corresponding frame ID in the `_friendlyToFrameIds` map.
+  /// If the frame ID is not found, it uses the [key] as the frame ID.
+  /// It then removes all frames from the ID3v2 tag that have the matching frame ID.
+  ///
+  /// Parameters:
+  /// - [key]: The metadata key.
+  ///
+  /// The function does not return any value.
   void _removeMetadata(String key) {
     final frameId = _friendlyToFrameIds[key] ?? key;
     _id3v2Tag.frames.removeWhere((frame) => frame.id == frameId);
   }
 
+  /// Updates the size of the ID3v2 tag by summing the sizes of all frames.
+  ///
+  /// This function iterates through each frame in the ID3v2 tag and adds the size of each frame to a running total.
+  /// The initial sum is set to 10, which accounts for the size of the tag header.
+  /// After calculating the total size, the function updates the `size` property of the `_id3v2Tag` object.
   void _updateTagSize() {
     _id3v2Tag.size =
         _id3v2Tag.frames.fold(10, (sum, frame) => sum + frame.size + 10);
   }
 
+  /// Safely writes the updated ID3 tag to the original file.
+  /// This function creates a temporary file, writes the updated tag to it,
+  /// creates a backup of the original file, replaces the original file with the temporary file,
+  /// and cleans up the temporary and backup files.
+  /// If an error occurs during the process, the function restores the backup file and logs the error.
   Future<void> _safeWriteUpdatedTag() async {
     final tempDir = await Directory.systemTemp.createTemp('id3_update_');
     final tempFile = File('${tempDir.path}/temp_id3');
@@ -948,6 +1393,17 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Converts an integer value into a list of 4 bytes in syncsafe format.
+  ///
+  /// The syncsafe format is used in ID3v2 tags to ensure that the tag size can be accurately
+  /// calculated even if the file is transferred over a network. In syncsafe format, the most
+  /// significant bit of each byte is cleared, and the remaining 7 bits are shifted to the right.
+  ///
+  /// Parameters:
+  /// - [value]: The integer value to be converted.
+  ///
+  /// Returns:
+  /// - A list of 4 bytes representing the input value in syncsafe format.
   List<int> _getSyncSafeBytes(int value) {
     return [
       (value >> 21) & 0x7F,
