@@ -1,39 +1,64 @@
-<!-- 
-This README describes the package. If you publish this package to pub.dev,
-this README's contents appear on the landing page for your package.
 
-For information about how to write a good package README, see the guide for
-[writing package pages](https://dart.dev/guides/libraries/writing-package-pages). 
-
-For general information about developing packages, see the Dart guide for
-[creating packages](https://dart.dev/guides/libraries/create-library-packages)
-and the Flutter guide for
-[developing packages and plugins](https://flutter.dev/developing-packages). 
--->
-
-TODO: Put a short description of the package here that helps potential users
-know whether this package might be useful for them.
+A package for handling MP4 and ID3 metadata and related operations.
 
 ## Features
 
-TODO: List what your package can do. Maybe include images, gifs, or videos.
-
-## Getting started
-
-TODO: List prerequisites and provide or point to information on how to
-start using the package.
+The package can perform the following tasks:
+- Read MP4 and ID3 metadata from files that support MP4 and ID3 codecs.
+- Add, update and remove MP4 and ID3 metadata.
 
 ## Usage
 
-TODO: Include short and useful examples for package users. Add longer examples
-to `/example` folder. 
+Initialize the respective handlers. 
 
+#### MP4
 ```dart
-const like = 'sample';
+final handler = MP4Handler(filePath);
+print(handler.metadata);
+```
+#### ID3
+```dart
+final handler = ID3Handler(filePath);
+print(handler.metadata);
+```
+#### Encoding metadata
+Encoding metadata is simple
+```dart
+// Queue multiple operations
+handler.addMetadata({
+'title': 'New Title',
+'artist': 'Artist',
+});
+handler.updateMetadata({'genre': 'New Genre'});
+handler.removeMetadata(['artist']);
+
+try {
+// Apply all queued changes at once
+await handler.applyMetadataChanges();
+print('Metadata changes applied successfully');
+} catch (e) {
+print('Failed to apply metadata changes: $e');
+}
 ```
 
-## Additional information
+## Metadata
 
-TODO: Tell users more about the package: where to find more information, how to 
-contribute to the package, how to file issues, what response they can expect 
-from the package authors, and more.
+| MP4         | ID3         |
+| ----------- | ----------- |
+| title       | title       |
+| artist      | artist      |
+| album       | album       |
+| year        | year        |
+| genre       | genre       |
+| composer    | composer    |
+| lyrics      | lyrics      |
+| comment     | comments    |
+| albumArtist | albumArtist |
+| trackNumber | trackNumber |
+| discNumber  | discNumber  |
+| cover       | picture     |
+| description |             |
+| copyright   | copyright   |
+| rating      | rating      |
+
+ 
