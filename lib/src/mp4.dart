@@ -81,6 +81,10 @@ class MP4Handler extends CodecHandler {
     // Parse the metadata.
     parseMetadata();
 
+    if (metadata.asMap().isNotEmpty) {
+      setMetadata('filePath', file.path);
+    }
+
     // Close the file.
     close();
   }
@@ -263,6 +267,9 @@ class MP4Handler extends CodecHandler {
 
   @override
   void parseMetadata() {
+    int fileSize = file.lengthSync();
+    setMetadata('size', fileSize); // Add file size to metadata
+
     final ftypAtom = _findAtom(_root, 'ftyp');
     _parseFtypAtom(ftypAtom);
 
@@ -859,8 +866,6 @@ class MP4Handler extends CodecHandler {
 
     close();
   }
-
-  
 
   /// Encodes a metadata atom for the given key and value into an [Atom] object.
   ///
