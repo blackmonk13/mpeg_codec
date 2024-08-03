@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:math' as math;
 
 import 'package:archive/archive.dart';
+import 'package:collection/collection.dart';
 
 import 'exceptions.dart';
 import 'genres.dart';
@@ -52,7 +54,7 @@ String _frameIdToKey(String frameId) {
       .key;
 }
 
-/// A class to handle ID3 tag operations.This class provides methods for 
+/// A class to handle ID3 tag operations.This class provides methods for
 /// reading, writing, and manipulating ID3 tags in various formats.
 /// It supports ID3v1, ID3v2, and APEv2 tag formats.
 class ID3Handler extends CodecHandler {
@@ -94,6 +96,10 @@ class ID3Handler extends CodecHandler {
       _parseID3v1();
       _parseAPEv2();
       _parseVorbisComments();
+      _calculateDuration();
+      if (metadata.asMap().isNotEmpty) {
+        setMetadata('filePath', file.path);
+      }
     } catch (e) {
       logger.w('Error parsing metadata: $e');
     } finally {
@@ -649,9 +655,16 @@ class ID3Handler extends CodecHandler {
     String mimeType = latin1.decode(data.sublist(1, mimeTypeEnd));
     int pictureType = data[mimeTypeEnd + 1];
     int descriptionEnd = _findNullTerminator(data, mimeTypeEnd + 2, encoding);
-    String description =
-        _decodeString(data.sublist(mimeTypeEnd + 2, descriptionEnd), encoding);
-    Uint8List pictureData = data.sublist(descriptionEnd);
+    String description = _decodeString(
+      data.sublist(mimeTypeEnd + 2, descriptionEnd),
+      encoding,
+    );
+
+    // Calculate the start of the actual image data
+    int imageDataStart =
+        descriptionEnd + (encoding == 1 || encoding == 2 ? 2 : 1);
+    Uint8List pictureData = data.sublist(imageDataStart);
+
     setMetadata('picture', {
       'mimeType': mimeType,
       'pictureType': pictureType,
@@ -681,6 +694,166 @@ class ID3Handler extends CodecHandler {
         'text': lyrics,
       });
     }
+  }
+
+  int _getBitrate(int version, int layer, int bitrateIndex) {
+    final bitrates = [
+      [32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+      [32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+      [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+      [32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+      [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    ];
+
+    int versionIndex = version == 3 ? 0 : 1;
+    int layerIndex = 3 - layer;
+    int bitRateArrayIndex = versionIndex * 3 + layerIndex;
+
+    return bitrateIndex > 0 && bitrateIndex <= 14
+        ? bitrates[bitRateArrayIndex][bitrateIndex - 1]
+        : 0;
+  }
+
+  Duration? _calculateDuration() {
+    try {
+      file.setPositionSync(0);
+      int fileSize = file.lengthSync();
+      setMetadata('size', fileSize); // Add file size to metadata
+
+      // Try to parse VBR headers first
+      Duration? vbrDuration = _parseVBRHeader();
+      if (vbrDuration != null) {
+        _setDurationMetadata(vbrDuration);
+        return vbrDuration;
+      }
+
+      // If VBR header not found, use sampling method
+      int totalFrames = 0;
+      int totalBitrate = 0;
+      int samplesCount = 0;
+      int sampleInterval = math.max(fileSize ~/ 1000,
+          1000); // Sample every ~1000 bytes or every 1KB, whichever is larger
+
+      for (int position = 0;
+          position < fileSize - 10;
+          position += sampleInterval) {
+        file.setPositionSync(position);
+        Uint8List header = file.readSync(4);
+
+        // Look for MP3 frame sync
+        if (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0) {
+          int version = (header[1] & 0x18) >> 3;
+          int layer = (header[1] & 0x06) >> 1;
+          int bitrate = _getBitrate(version, layer, header[2] >> 4);
+          int sampleRate = _getSampleRate(version, (header[2] & 0x0C) >> 2);
+
+          if (bitrate > 0 && sampleRate > 0) {
+            totalFrames++;
+            totalBitrate += bitrate;
+            samplesCount++;
+          }
+        }
+      }
+
+      if (samplesCount > 0) {
+        double avgBitrate = totalBitrate / samplesCount;
+        double durationSeconds = (fileSize * 8) / (avgBitrate * 1000);
+        Duration calculatedDuration =
+            Duration(milliseconds: (durationSeconds * 1000).round());
+        _setDurationMetadata(calculatedDuration);
+        return calculatedDuration;
+      }
+    } catch (e) {
+      logger.e('Error calculating duration: $e');
+    }
+    return null;
+  }
+
+  int _getSampleRate(int version, int sampleRateIndex) {
+    final sampleRates = [
+      [44100, 48000, 32000],
+      [22050, 24000, 16000],
+      [11025, 12000, 8000],
+    ];
+
+    int versionIndex = version == 3 ? 0 : (version == 2 ? 1 : 2);
+    return sampleRateIndex < 3 ? sampleRates[versionIndex][sampleRateIndex] : 0;
+  }
+
+  Duration? _parseVBRHeader() {
+    try {
+      file.setPositionSync(0);
+      Uint8List initialData = file.readSync(10);
+
+      // Skip ID3v2 tag if present
+      if (initialData
+          .sublist(0, 3)
+          .equals(Uint8List.fromList([0x49, 0x44, 0x33]))) {
+        int tagSize = _syncSafeInteger(initialData.sublist(6, 10)) + 10;
+        file.setPositionSync(tagSize);
+        initialData = file.readSync(10);
+      }
+
+      // Find first MP3 frame
+      int frameStart = 0;
+      while (frameStart < initialData.length - 1) {
+        if (initialData[frameStart] == 0xFF &&
+            (initialData[frameStart + 1] & 0xE0) == 0xE0) {
+          break;
+        }
+        frameStart++;
+      }
+
+      if (frameStart >= initialData.length - 1) {
+        return null; // No MP3 frame found
+      }
+
+      file.setPositionSync(file.positionSync() - (10 - frameStart));
+      Uint8List frameHeader = file.readSync(4);
+      int version = (frameHeader[1] & 0x18) >> 3;
+      int layer = (frameHeader[1] & 0x06) >> 1;
+      int sampleRate = _getSampleRate(version, (frameHeader[2] & 0x0C) >> 2);
+
+      // Check for Xing/Info header
+      file.setPositionSync(file.positionSync() + (version == 3 ? 32 : 17));
+      Uint8List xingHeader = file.readSync(12);
+      if (xingHeader
+              .sublist(0, 4)
+              .equals(Uint8List.fromList([0x58, 0x69, 0x6E, 0x67])) || // "Xing"
+          xingHeader
+              .sublist(0, 4)
+              .equals(Uint8List.fromList([0x49, 0x6E, 0x66, 0x6F]))) {
+        // "Info"
+        int flags = ByteData.view(xingHeader.buffer).getUint32(4);
+        int framesOffset = 8;
+        if ((flags & 0x1) != 0) {
+          // Frames field is present
+          int totalFrames =
+              ByteData.view(xingHeader.buffer).getUint32(framesOffset);
+          double durationSeconds = totalFrames * 1152 / sampleRate;
+          return Duration(milliseconds: (durationSeconds * 1000).round());
+        }
+      }
+
+      // Check for VBRI header
+      file.setPositionSync(file.positionSync() - 12 + 32);
+      Uint8List vbriHeader = file.readSync(26);
+      if (vbriHeader
+          .sublist(0, 4)
+          .equals(Uint8List.fromList([0x56, 0x42, 0x52, 0x49]))) {
+        // "VBRI"
+        int totalFrames = ByteData.view(vbriHeader.buffer).getUint32(14);
+        double durationSeconds = totalFrames * 1152 / sampleRate;
+        return Duration(milliseconds: (durationSeconds * 1000).round());
+      }
+    } catch (e) {
+      logger.e('Error parsing VBR header: $e');
+    }
+    return null;
+  }
+
+  void _setDurationMetadata(Duration duration) {
+    setMetadata('duration', duration.inMilliseconds);
   }
 
   /// Splits the given [data] into a list of sublists based on null terminators.
@@ -1403,5 +1576,11 @@ class ID3Handler extends CodecHandler {
       (value >> 7) & 0x7F,
       value & 0x7F,
     ];
+  }
+}
+
+extension on Uint8List {
+  bool equals(Uint8List other) {
+    return ListEquality<int>().equals(other, this);
   }
 }
