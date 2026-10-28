@@ -165,8 +165,12 @@ abstract class CodecHandler {
   ///   A [Uint8List] containing the bytes of the given integer in big-endian
   ///   order.
   Uint8List intToBytes(int value, int byteCount) {
-    final bytes = ByteData(byteCount)..setUint32(0, value, Endian.big);
-    return bytes.buffer.asUint8List();
+    final bytes = Uint8List(byteCount);
+    for (var i = byteCount - 1; i >= 0; i--) {
+      bytes[i] = value & 0xFF;
+      value >>= 8;
+    }
+    return bytes;
   }
 
   /// Closes the file.
