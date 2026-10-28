@@ -44,12 +44,16 @@ class ID3v2Frame {
   /// The actual data stored in the frame.
   final Uint8List data;
 
+  /// The raw frame header flags, written back unchanged.
+  final int flags;
+
   /// Constructs a new [ID3v2Frame] object.
   ID3v2Frame(
     this.id,
     this.size,
-    this.data,
-  );
+    this.data, {
+    this.flags = 0,
+  });
 }
 
 class ID3v1Tag {
