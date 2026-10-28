@@ -57,6 +57,7 @@ abstract class CodecHandler {
   /// [filePath] is the path to the file to be handled.
   CodecHandler(String filePath) {
     _filePath = filePath;
+    Logger.level = Level.error;
   }
 
   /// Opens the file for reading.
