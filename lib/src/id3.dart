@@ -60,6 +60,9 @@ class ID3Handler extends CodecHandler {
   /// The ID3v2 tag being handled.
   late ID3v2Tag _id3v2Tag;
 
+  /// Offset of the first byte after the ID3v2 tag (0 if there is none).
+  int _audioStart = 0;
+
   /// A map of custom frame handlers for handling unknown or unsupported frames.
   final Map<String, Function> _customFrameHandlers = {};
 
@@ -90,6 +93,7 @@ class ID3Handler extends CodecHandler {
   @override
   void parseMetadata() {
     openRead();
+    metadata.clear();
     try {
       _id3v2Tag = _parseID3v2();
       _parseID3v1();
@@ -157,9 +161,11 @@ class ID3Handler extends CodecHandler {
         _parseID3v2Footer(tagData.sublist(tagData.length - 10));
       }
 
+      _audioStart = 10 + size + (footerPresent ? 10 : 0);
       return ID3v2Tag(version, revision, flags, size, frames);
     } else {
       logger.w('No ID3v2 tag found');
+      _audioStart = 0;
       return ID3v2Tag(0, 0, 0, 0, []);
     }
   }
@@ -249,9 +255,12 @@ class ID3Handler extends CodecHandler {
 
       var frameData = data.sublist(offset + 10, offset + 10 + frameSize);
       try {
-        ID3v2Frame frame = ID3v2Frame(frameId, frameSize, frameData);
-        _parseID3v2Frame(frame, frameFlags, version);
+        ID3v2Frame frame =
+            ID3v2Frame(frameId, frameSize, frameData, flags: frameFlags);
+        // Keep the frame even if its metadata cannot be parsed, so that
+        // writing the tag back does not lose it.
         frames.add(frame);
+        _parseID3v2Frame(frame, frameFlags, version);
       } catch (e) {
         logger.w('Error parsing frame $frameId: $e');
       }
@@ -1237,267 +1246,218 @@ class ID3Handler extends CodecHandler {
     }
   }
 
+  /// Writes the file, with the current frames, to [outputPath].
+  ///
+  /// The new ID3v2 tag replaces the original one and everything after it
+  /// (audio, ID3v1 and APE tags) is copied unchanged.
   @override
-  Future<void> writeToFile(String outputPath) async {
-    final outputFile = await File(outputPath).open(mode: FileMode.write);
+  Future<void> writeToFile(String outputPath) =>
+      _writeWithFrames(outputPath, _id3v2Tag.frames);
 
+  /// The ID3v2 version used when writing: the version of the existing tag if
+  /// it is 2.3, otherwise 2.4.
+  int get _writeVersion => _id3v2Tag.version == 3 ? 3 : 4;
+
+  Future<void> _writeWithFrames(
+    String outputPath,
+    List<ID3v2Frame> frames,
+  ) async {
+    final version = _writeVersion;
+    final tag = BytesBuilder(copy: false);
+
+    for (final frame in frames) {
+      final header = ByteData(10);
+      for (var i = 0; i < 4; i++) {
+        header.setUint8(i, frame.id.codeUnitAt(i));
+      }
+      if (version == 4) {
+        header.buffer.asUint8List().setRange(
+              4,
+              8,
+              _getSyncSafeBytes(frame.data.length),
+            );
+      } else {
+        header.setUint32(4, frame.data.length, Endian.big);
+      }
+      header.setUint16(8, frame.flags, Endian.big);
+      tag.add(header.buffer.asUint8List());
+      tag.add(frame.data);
+    }
+
+    final tagBytes = tag.takeBytes();
+    final tagHeader = Uint8List.fromList([
+      0x49, 0x44, 0x33, // 'ID3'
+      version, 0x00, // version and revision
+      0x00, // flags: no unsynchronization, extended header or footer
+      ..._getSyncSafeBytes(tagBytes.length),
+    ]);
+
+    final input = File(file.path).openSync(mode: FileMode.read);
+    final output = File(outputPath).openSync(mode: FileMode.write);
     try {
-      await _writeID3v2Tag(outputFile);
-      await _copyAudioData(outputFile);
-      await _writeID3v1Tag(outputFile);
+      output.writeFromSync(tagHeader);
+      output.writeFromSync(tagBytes);
+
+      input.setPositionSync(math.min(_audioStart, input.lengthSync()));
+      final buffer = Uint8List(1024 * 1024);
+      int bytesRead;
+      while ((bytesRead = input.readIntoSync(buffer)) > 0) {
+        output.writeFromSync(buffer, 0, bytesRead);
+      }
     } finally {
-      outputFile.closeSync();
+      input.closeSync();
+      output.closeSync();
     }
 
     logger.d('File written successfully to: $outputPath');
   }
 
-  /// Writes the ID3v2 tag to the output file.
+  /// Returns the ID3v2 frame ID for the friendly [key], or [key] itself when
+  /// it is already a frame ID.
   ///
-  /// The function writes the ID3v2 tag to the output file in the following steps:
-  /// 1. Writes the ID3v2 tag header, including the 'ID3' signature, version, and flags.
-  /// 2. Writes a placeholder for the tag size.
-  /// 3. Stores the current position in the file as the start position of the tag.
-  /// 4. Iterates through each frame in the ID3v2 tag and writes the frame to the file.
-  /// 5. Calculates the end position of the tag in the file.
-  /// 6. Calculates the tag size by subtracting the start position from the end position.
-  /// 7. Writes the tag size to the placeholder position in the file.
-  /// 8. Moves the file position to the end position of the tag.
-  ///
-  /// @param outputFile The output file to write the ID3v2 tag to.
-  /// @return A future that completes when the ID3v2 tag has been written to the file.
-  Future<void> _writeID3v2Tag(RandomAccessFile outputFile) async {
-    outputFile.setPositionSync(0);
-    outputFile.writeFromSync(utf8.encode('ID3'));
-    outputFile.writeFromSync([0x04, 0x00, 0x00]); // Version and flags
-
-    int sizePosition = outputFile.positionSync();
-    outputFile.writeFromSync([0x00, 0x00, 0x00, 0x00]); // Placeholder for size
-
-    int startPosition = outputFile.positionSync();
-
-    for (var frame in _id3v2Tag.frames) {
-      await _writeFrame(outputFile, frame);
-    }
-
-    int endPosition = outputFile.positionSync();
-    int tagSize = endPosition - startPosition;
-
-    outputFile.setPositionSync(sizePosition);
-    outputFile.writeFromSync(_getSyncSafeBytes(tagSize));
-    outputFile.setPositionSync(endPosition);
-  }
-
-  /// Writes an ID3v2 frame to the output file.
-  ///
-  /// This function writes an ID3v2 frame to the output file in the following steps:
-  /// 1. Writes the frame ID (four ASCII characters).
-  /// 2. Writes the frame size (32-bit synchsafe integer).
-  /// 3. Writes the frame flags (16-bit integer).
-  /// 4. Writes the frame data.
-  ///
-  /// @param outputFile The output file to write the ID3v2 frame to.
-  /// @param frame The ID3v2 frame to write.
-  /// @return A future that completes when the ID3v2 frame has been written to the file.
-  Future<void> _writeFrame(
-    RandomAccessFile outputFile,
-    ID3v2Frame frame,
-  ) async {
-    outputFile.writeFromSync(utf8.encode(frame.id));
-    outputFile.writeFromSync(_getSyncSafeBytes(frame.size));
-    outputFile.writeFromSync([0x00, 0x00]); // Frame flags
-    outputFile.writeFromSync(frame.data);
-  }
-
-  /// Copies the audio data from the current position in the original file to the output file.
-  ///
-  /// This function reads the audio data from the original file, starting from the position
-  /// after the ID3v2 tag, and writes it to the output file. The function uses a buffer of 5 MB
-  /// to read and write the data in chunks.
-  ///
-  /// @param outputFile The output file to write the audio data to.
-  /// @return A future that completes when the audio data has been copied to the output file.
-  Future<void> _copyAudioData(RandomAccessFile outputFile) async {
-    openRead();
-    file.setPositionSync(_id3v2Tag.size);
-    outputFile.setPositionSync(outputFile.lengthSync());
-
-    final bufferSize = 5 * 1024 * 1024; // 5 MB buffer
-    var buffer = Uint8List(bufferSize);
-    int bytesRead;
-
-    while ((bytesRead = file.readIntoSync(buffer)) > 0) {
-      outputFile.writeFromSync(buffer.sublist(0, bytesRead));
-    }
-    close();
-  }
-
-  /// Writes the ID3v1 tag to the output file.
-  ///
-  /// The function writes the ID3v1 tag to the output file in the following steps:
-  /// 1. Writes the tag header, including the 'TAG' signature.
-  /// 2. Writes the title (30 bytes) of the metadata.
-  /// 3. Writes the artist (30 bytes) of the metadata.
-  /// 4. Writes the album (30 bytes) of the metadata.
-  /// 5. Writes the year (4 bytes) of the metadata.
-  /// 6. Writes the comment (28 or 30 bytes) of the metadata. If the track number is available,
-  ///    it writes the comment in ID3v1.1 format with a track number at the end.
-  /// 7. Writes the genre (1 byte) of the metadata. If the genre is not found in the predefined list,
-  ///    it writes 255 (unknown genre).
-  ///
-  /// @param outputFile The output file to write the ID3v1 tag to.
-  Future<void> _writeID3v1Tag(RandomAccessFile outputFile) async {
-    outputFile.setPositionSync(outputFile.lengthSync());
-    outputFile.writeFromSync(utf8.encode('TAG'));
-
-    // Write title (30 bytes)
-    String title = getMetadata<String>('title') ?? '';
-    outputFile.writeFromSync(_padOrTruncate(title, 30));
-
-    // Write artist (30 bytes)
-    String artist = getMetadata<String>('artist') ?? '';
-    outputFile.writeFromSync(_padOrTruncate(artist, 30));
-
-    // Write album (30 bytes)
-    String album = getMetadata<String>('album') ?? '';
-    outputFile.writeFromSync(_padOrTruncate(album, 30));
-
-    // Write year (4 bytes)
-    String year = getMetadata<String>('year') ?? '';
-    outputFile.writeFromSync(_padOrTruncate(year, 4));
-
-    // Write comment (28 or 30 bytes)
-    String comment = getMetadata<String>('comment') ?? '';
-    int? track = getMetadata<int>('track');
-    if (track != null) {
-      // ID3v1.1 format (with track number)
-      outputFile.writeFromSync(_padOrTruncate(comment, 28));
-      outputFile.writeFromSync([0, track]);
-    } else {
-      // ID3v1.0 format
-      outputFile.writeFromSync(_padOrTruncate(comment, 30));
-    }
-
-    // Write genre (1 byte)
-    String genre = getMetadata<String>('genre') ?? '';
-    int genreId = genres.indexOf(genre);
-    outputFile.writeFromSync([genreId >= 0 ? genreId : 255]);
+  /// `TYER` was dropped in ID3v2.4, where the year lives in `TDRC`.
+  String _frameIdFor(String key, int version) {
+    if (key == 'year' && version == 4) return 'TDRC';
+    return _friendlyToFrameIds[key] ?? key;
   }
 
   /// Encodes the given metadata [value] into an ID3v2 frame with the specified [key].
   ///
-  /// The function uses the [key] to look up the corresponding frame ID in the `_friendlyToFrameIds` map.
-  /// It then calls the `_encodeMetadataValue` function to encode the [value] into a byte list.
-  /// If the encoded value is `null`, the function logs a warning message and returns `null`.
-  /// Otherwise, it creates an `ID3v2Frame` object with the frame ID, data length, and encoded data,
-  /// and returns the frame.
-  ///
-  /// Parameters:
-  /// - [key]: The metadata key.
-  /// - [value]: The metadata value to be encoded.
-  ///
-  /// Returns:
-  /// - An `ID3v2Frame` object containing the encoded metadata, or `null` if the encoding fails.
+  /// Returns `null` (and logs a warning) if the key is not a valid frame ID
+  /// or the value cannot be encoded for that frame.
   ID3v2Frame? encodeMetadataFrame(String key, dynamic value) {
-    final frameId = _friendlyToFrameIds[key] ?? key;
-    final encodedValue = _encodeMetadataValue(key, value);
+    final version = _writeVersion;
+    final frameId = _frameIdFor(key, version);
 
+    if (!RegExp(r'^[A-Z0-9]{4}$').hasMatch(frameId)) {
+      logger.w('Not a valid ID3v2 frame ID: $frameId (from key: $key)');
+      return null;
+    }
+
+    final encodedValue = _encodeMetadataValue(key, frameId, value, version);
     if (encodedValue == null) {
       logger.w('Failed to encode metadata for key: $key');
       return null;
     }
 
-    final frameData = Uint8List.fromList(encodedValue);
-    return ID3v2Frame(frameId, frameData.length, frameData);
+    return ID3v2Frame(frameId, encodedValue.length, encodedValue);
   }
 
-  /// Pads or truncates the given [text] to the specified [length].
+  /// Encodes [text] for a frame of the given ID3v2 [version].
   ///
-  /// If the length of the [text] is greater than the specified [length], the function
-  /// truncates the text to the specified length. If the length of the [text] is less than
-  /// the specified [length], the function pads the text with zeros to the specified length.
-  ///
-  /// Parameters:
-  /// - [text]: The input text to be padded or truncated.
-  /// - [length]: The desired length of the output text.
-  ///
-  /// Returns:
-  /// - A [Uint8List] containing the padded or truncated text.
-  Uint8List _padOrTruncate(String text, int length) {
-    if (text.length > length) {
-      return Uint8List.fromList(utf8.encode(text.substring(0, length)));
-    } else {
-      return Uint8List.fromList(utf8.encode(text).padRight(length, 0));
+  /// ID3v2.4 uses UTF-8. ID3v2.3 has no UTF-8, so the text is ISO-8859-1 when
+  /// it fits and UTF-16 with a byte order mark otherwise.
+  ({int encoding, Uint8List bytes}) _encodeText(String text, int version) {
+    if (version == 4) {
+      return (encoding: 3, bytes: Uint8List.fromList(utf8.encode(text)));
     }
+    if (text.codeUnits.every((c) => c <= 0xFF)) {
+      return (encoding: 0, bytes: Uint8List.fromList(latin1.encode(text)));
+    }
+    final bytes = BytesBuilder()..add([0xFF, 0xFE]);
+    for (final unit in text.codeUnits) {
+      bytes.add([unit & 0xFF, unit >> 8]);
+    }
+    return (encoding: 1, bytes: bytes.takeBytes());
   }
 
-  /// Encodes the given metadata [value] into an ID3v2 frame with the specified [key].
-  ///
-  /// The function uses the [key] to look up the corresponding frame ID in the `_friendlyToFrameIds` map.
-  /// It then calls the `_encodeMetadataValue` function to encode the [value] into a byte list.
-  /// If the encoded value is `null`, the function logs a warning message and returns `null`.
-  /// Otherwise, it creates an `ID3v2Frame` object with the frame ID, data length, and encoded data,
-  /// and returns the frame.
-  ///
-  /// Parameters:
-  /// - [key]: The metadata key.
-  /// - [value]: The metadata value to be encoded.
-  ///
-  /// Returns:
-  /// - An `ID3v2Frame` object containing the encoded metadata, or `null` if the encoding fails.
-  Uint8List? _encodeMetadataValue(String key, dynamic value) {
-    if (value is String) {
+  /// An empty string followed by its terminator, in the given text [encoding].
+  List<int> _emptyTerminatedString(int encoding) =>
+      encoding == 1 ? [0xFF, 0xFE, 0x00, 0x00] : [0x00];
+
+  /// Turns [value] into the text stored in a text frame, or `null` if the
+  /// value has no text form.
+  String? _textFromValue(dynamic value, int version) {
+    if (value is String) return value;
+    if (value is int) return value.toString();
+    if (value is bool) return value ? '1' : '0';
+    if (value is List<int> && value.length == 2) {
+      // Number pairs such as track or disc: "number/total".
+      return value[1] > 0 ? '${value[0]}/${value[1]}' : '${value[0]}';
+    }
+    if (value is List<String>) {
+      return value.join(version == 4 ? '\x00' : '/');
+    }
+    return null;
+  }
+
+  /// Encodes [value] as the body of the frame [frameId].
+  Uint8List? _encodeMetadataValue(
+    String key,
+    String frameId,
+    dynamic value,
+    int version,
+  ) {
+    if (value is Uint8List && key == 'picture') {
+      return _encodePictureFrame(value);
+    }
+
+    if (value is Uint8List) {
+      // Raw frame body for frames without a dedicated encoder.
+      return value;
+    }
+
+    if (frameId == 'COMM' || frameId == 'USLT') {
+      if (value is! String) return null;
+      final text = _encodeText(value, version);
       return Uint8List.fromList([
-        0x03,
-        ...utf8.encode(value),
-      ]); // UTF-8 encoding
-    } else if (value is int) {
-      return Uint8List.fromList([
-        0x00,
-        ...intToBytes(value, 4),
-      ]); // ISO-8859-1 encoding
-    } else if (value is bool) {
-      return Uint8List.fromList([
-        0x00,
-        value ? 1 : 0,
-      ]); // ISO-8859-1 encoding
-    } else if (value is List<int> && value.length == 2) {
-      // For numeric pairs like track number or disk number
-      return Uint8List.fromList([
-        0x00,
-        ...value.expand((i) => intToBytes(i, 2))
-      ]); // ISO-8859-1 encoding
-    } else if (value is Uint8List && key == 'picture') {
-      // Handle artwork (APIC frame)
-      String mimeType = _getMimeType(value);
-      return Uint8List.fromList([
-        0x00, // Text encoding (ISO-8859-1)
-        // ignore: unnecessary_string_escapes
-        ...ascii.encode('$mimeType\0'), // MIME type
-        0x03, // Picture type (0x03 = front cover)
-        // ignore: unnecessary_string_escapes
-        ...ascii.encode('Cover\0'), // Description
-        ...value // Picture data
+        text.encoding,
+        ...ascii.encode('eng'),
+        ..._emptyTerminatedString(text.encoding), // empty description
+        ...text.bytes,
       ]);
-    } else {
-      logger.w(
-        'Unsupported metadata value type: ${value.runtimeType} for key: $key',
-      );
-      return null;
     }
+
+    if (frameId.startsWith('W') && frameId != 'WXXX') {
+      // URL frames are plain ISO-8859-1 with no encoding byte.
+      return value is String ? Uint8List.fromList(latin1.encode(value)) : null;
+    }
+
+    if (frameId.startsWith('T') && frameId != 'TXXX') {
+      final textValue = _textFromValue(value, version);
+      if (textValue == null) return null;
+      final text = _encodeText(textValue, version);
+      return Uint8List.fromList([text.encoding, ...text.bytes]);
+    }
+
+    return null;
+  }
+
+  Uint8List _encodePictureFrame(Uint8List picture) {
+    return Uint8List.fromList([
+      0x00, // text encoding (ISO-8859-1)
+      ...ascii.encode(_getMimeType(picture)),
+      0x00,
+      0x03, // picture type: front cover
+      ...ascii.encode('Cover'),
+      0x00,
+      ...picture,
+    ]);
   }
 
   String _getMimeType(Uint8List imageData) {
-    if (imageData.length > 2) {
+    if (imageData.length > 3) {
       if (imageData[0] == 0xFF && imageData[1] == 0xD8) {
         return 'image/jpeg';
       } else if (imageData[0] == 0x89 && imageData[1] == 0x50) {
         return 'image/png';
+      } else if (imageData[0] == 0x47 &&
+          imageData[1] == 0x49 &&
+          imageData[2] == 0x46) {
+        return 'image/gif';
       }
     }
-    return 'image/unknown';
+    return 'image/jpeg';
   }
 
+  /// Applies the queued operations and rewrites the file.
+  ///
+  /// Setting a key replaces every frame with that ID, and removing a key
+  /// removes them all. The file is only replaced once the new one has been
+  /// written completely, so a failure leaves the original untouched.
+  ///
+  /// Throws an [ID3Exception] if a value cannot be encoded or the file cannot
+  /// be written.
   @override
   Future<void> applyMetadataChanges() async {
     if (pendingOperations.isEmpty) {
@@ -1505,140 +1465,57 @@ class ID3Handler extends CodecHandler {
       return;
     }
 
-    for (MetadataOperation operation in pendingOperations) {
+    final frames = List<ID3v2Frame>.of(_id3v2Tag.frames);
+    for (final operation in pendingOperations) {
       switch (operation.type) {
         case OperationType.add:
         case OperationType.update:
-          _addOrUpdateMetadata(operation.key, operation.value);
+          _addOrUpdateFrame(frames, operation.key, operation.value);
           break;
         case OperationType.remove:
-          _removeMetadata(operation.key);
+          final frameId = _frameIdFor(operation.key, _writeVersion);
+          frames.removeWhere((frame) => frame.id == frameId);
           break;
       }
     }
 
-    _updateTagSize();
-
     try {
-      await _safeWriteUpdatedTag();
-      pendingOperations.clear();
-      parseMetadata(); // Reopen the file and rebuild the ID3 tag
+      await _safeWrite(frames);
     } catch (e) {
       throw ID3Exception('Failed to apply metadata changes: $e');
     }
+
+    pendingOperations.clear();
+    parseMetadata(); // Rebuild the metadata and tag from the new file
   }
 
-  /// Adds or updates the metadata for the given [key] with the provided [value].
-  ///
-  /// This function first looks up the corresponding frame ID in the `_friendlyToFrameIds` map.
-  /// If the frame ID is not found, it uses the [key] as the frame ID.
-  /// It then encodes the [value] into an ID3v2 frame using the `encodeMetadataFrame` function.
-  /// If the encoding fails, it throws an `ID3Exception`.
-  ///
-  /// If the frame ID already exists in the ID3v2 tag, it updates the existing frame with the new encoded frame.
-  /// Otherwise, it adds the encoded frame to the ID3v2 tag.
-  ///
-  /// Parameters:
-  /// - [key]: The metadata key.
-  /// - [value]: The metadata value to be encoded.
-  ///
-  /// Throws:
-  /// - `ID3Exception`: If the encoding fails.
-  void _addOrUpdateMetadata(String key, dynamic value) {
-    final frameId = _friendlyToFrameIds[key] ?? key;
+  void _addOrUpdateFrame(List<ID3v2Frame> frames, String key, dynamic value) {
     final encodedFrame = encodeMetadataFrame(key, value);
-
     if (encodedFrame == null) {
       throw ID3Exception('Failed to encode metadata for key: $key');
     }
-    setMetadata(key, value);
 
-    int existingIndex =
-        _id3v2Tag.frames.indexWhere((frame) => frame.id == frameId);
-    if (existingIndex != -1) {
-      _id3v2Tag.frames[existingIndex] = encodedFrame;
-    } else {
-      _id3v2Tag.frames.add(encodedFrame);
-    }
+    final index = frames.indexWhere((frame) => frame.id == encodedFrame.id);
+    frames.removeWhere((frame) => frame.id == encodedFrame.id);
+    // Keep the frame where it was so the tag order stays stable.
+    frames.insert(index == -1 ? frames.length : index, encodedFrame);
   }
 
-  /// Removes the metadata associated with the given [key] from the ID3v2 tag.
-  ///
-  /// This function first looks up the corresponding frame ID in the `_friendlyToFrameIds` map.
-  /// If the frame ID is not found, it uses the [key] as the frame ID.
-  /// It then removes all frames from the ID3v2 tag that have the matching frame ID.
-  ///
-  /// Parameters:
-  /// - [key]: The metadata key.
-  ///
-  /// The function does not return any value.
-  void _removeMetadata(String key) {
-    final frameId = _friendlyToFrameIds[key] ?? key;
-    _id3v2Tag.frames.removeWhere((frame) => frame.id == frameId);
-  }
-
-  /// Updates the size of the ID3v2 tag by summing the sizes of all frames.
-  ///
-  /// This function iterates through each frame in the ID3v2 tag and adds the size of each frame to a running total.
-  /// The initial sum is set to 10, which accounts for the size of the tag header.
-  /// After calculating the total size, the function updates the `size` property of the `_id3v2Tag` object.
-  void _updateTagSize() {
-    _id3v2Tag.size =
-        _id3v2Tag.frames.fold(10, (sum, frame) => sum + frame.size + 10);
-  }
-
-  /// Safely writes the updated ID3 tag to the original file.
-  /// This function creates a temporary file, writes the updated tag to it,
-  /// creates a backup of the original file, replaces the original file with the temporary file,
-  /// and cleans up the temporary and backup files.
-  /// If an error occurs during the process, the function restores the backup file and logs the error.
-  Future<void> _safeWriteUpdatedTag() async {
-    final tempDir = await Directory.systemTemp.createTemp('id3_update_');
-    final tempFile = File('${tempDir.path}/temp_id3');
-    final backupFile = File('${file.path}.bak');
-
+  /// Writes the updated file next to the original and renames it over the
+  /// original, so the original is never half-written.
+  Future<void> _safeWrite(List<ID3v2Frame> frames) async {
+    final path = file.path;
+    final tempFile = File('$path.tmp');
     try {
-      // Write to temporary file
-      await writeToFile(tempFile.path);
-
-      // Create a backup of the original file
-      await File(file.path).copy(backupFile.path);
-
-      // Replace the original file with the temporary file
-      await tempFile.copy(file.path);
-
-      // If everything succeeded, delete the backup and temp files
-      await backupFile.delete();
-      await tempFile.delete();
-      await tempDir.delete();
+      await _writeWithFrames(tempFile.path, frames);
+      await tempFile.rename(path);
     } catch (e) {
       logger.e('Error during file write: $e');
-
-      // If backup exists, restore it
-      if (await backupFile.exists()) {
-        await backupFile.copy(file.path);
-        await backupFile.delete();
-      }
-
-      // Clean up temp files
-      if (await tempFile.exists()) await tempFile.delete();
-      if (await tempDir.exists()) await tempDir.delete();
-
-      throw ID3Exception('Failed to write updated ID3 tag: $e');
+      if (tempFile.existsSync()) tempFile.deleteSync();
+      rethrow;
     }
   }
 
-  /// Converts an integer value into a list of 4 bytes in syncsafe format.
-  ///
-  /// The syncsafe format is used in ID3v2 tags to ensure that the tag size can be accurately
-  /// calculated even if the file is transferred over a network. In syncsafe format, the most
-  /// significant bit of each byte is cleared, and the remaining 7 bits are shifted to the right.
-  ///
-  /// Parameters:
-  /// - [value]: The integer value to be converted.
-  ///
-  /// Returns:
-  /// - A list of 4 bytes representing the input value in syncsafe format.
   List<int> _getSyncSafeBytes(int value) {
     return [
       (value >> 21) & 0x7F,
