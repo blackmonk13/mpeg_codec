@@ -21,6 +21,9 @@ class Metadata {
   /// [key]: The key to be checked.
   ///
   /// Returns: `true` if the metadata contains the given key, otherwise `false`.
+  /// Removes all entries.
+  void clear() => _data.clear();
+
   bool contains(String key) => _data.containsKey(key);
 
   /// Returns an unmodifiable view of the metadata as a map.
