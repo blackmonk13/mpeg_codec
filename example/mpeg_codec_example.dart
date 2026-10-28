@@ -1,10 +1,13 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:logger/logger.dart';
 import 'package:mpeg_codec/mpeg_codec.dart';
 import 'package:path/path.dart' as path;
 
 void main(List<String> args) async {
+  Logger.level = Level.error;
+
   if (args.isEmpty) {
     print("please provide a folder");
     return;
