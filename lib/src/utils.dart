@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'package:collection/collection.dart';
+
 /// Converts a [Duration] object into a human-readable string format.
 ///
 /// The function takes a [Duration] object as input and returns a string representation of the duration.
@@ -26,18 +28,13 @@ String formatDuration(Duration duration) {
   }
 }
 
-/// Extends the functionality of the [Uint8List] class by adding a [padRight] method.
-/// This method pads the list with a specified [padValue] until it reaches the specified [length].
-/// If the list's length is already greater than or equal to the specified [length], the original list is returned.
-extension PadRightExtension on Uint8List {
-  /// Pads the current [Uint8List] with a specified [padValue] until it reaches the specified [length].
-  ///
-  /// Parameters:
-  /// - length: The desired length of the padded list.
-  /// - padValue: The value to use for padding the list.
-  ///
-  /// Returns:
-  /// A new [Uint8List] with the specified [length], containing the original list's elements followed by the [padValue].
+
+
+extension Uint8Utils on Uint8List {
+  bool equals(Uint8List other) {
+    return ListEquality<int>().equals(other, this);
+  }
+
   Uint8List padRight(int length, int padValue) {
     if (this.length >= length) {
       return Uint8List.fromList(this);

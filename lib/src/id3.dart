@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'dart:math' as math;
 
 import 'package:archive/archive.dart';
-import 'package:collection/collection.dart';
 
 import 'exceptions.dart';
 import 'genres.dart';
@@ -519,21 +518,69 @@ class ID3Handler extends CodecHandler {
   /// - [frameId]: A string representing the ID of the text frame.
   /// - [data]: A [Uint8List] containing the binary data of the text frame.
   void _parseTextFrame(String frameId, Uint8List data) {
-    String text = _decodeTextFrame(data);
+    List<String> textValues = _decodeTextFrame(data);
     String key = _frameIdToKey(frameId);
-    if (frameId == 'TRCK') {
-      // Handle track number / total tracks
-      List<String> parts = text.split('/');
-      setMetadata('trackNumber', int.tryParse(parts[0].trim()));
-      if (parts.length > 1) {
-        setMetadata('totalTracks', int.tryParse(parts[1].trim()));
-      }
-    } else if (text.contains('\x00')) {
-      setMetadata(key, text.split('\x00'));
-    } else {
-      setMetadata(key, text);
+
+    if (textValues.isEmpty) {
+      logger.w('Empty text frame for $frameId');
+      return;
+    }
+
+    switch (frameId) {
+      case 'TRCK':
+      case 'TPOS':
+        _parseNumberPairFrame(key, textValues[0]);
+        break;
+      case 'TCON':
+        _parseGenreFrame(textValues);
+        break;
+      default:
+        if (textValues.length > 1) {
+          setMetadata(key, textValues);
+        } else {
+          setMetadata(key, textValues[0]);
+        }
     }
   }
+
+  void _parseNumberPairFrame(String key, String value) {
+    List<int> numbers = value
+        .split('/')
+        .map((s) => int.tryParse(s.trim()))
+        .where((n) => n != null)
+        .cast<int>()
+        .toList();
+
+    if (numbers.isNotEmpty) {
+      if (numbers.length == 1) {
+        numbers.add(0); // Add 0 as total if not provided
+      }
+      setMetadata(key, numbers);
+    }
+  }
+
+  void _parseGenreFrame(List<String> values) {
+    List<String> genreList = [];
+    for (String value in values) {
+      if (value.startsWith('(') && value.contains(')')) {
+        // Handle numeric genre codes
+        int? genreCode = int.tryParse(value.substring(1, value.indexOf(')')));
+        if (genreCode != null && genreCode < genres.length) {
+          genreList.add(genres[genreCode]);
+        } else {
+          genreList.add(value.substring(value.indexOf(')') + 1).trim());
+        }
+      } else {
+        genreList.add(value);
+      }
+    }
+    setMetadata(
+      'genre',
+      genreList.length == 1 ? genreList[0] : genreList,
+    );
+  }
+
+  String capitalize(String s) => s[0].toUpperCase() + s.substring(1);
 
   /// Parses a user-defined text frame from the ID3v2 tag.
   ///
@@ -574,24 +621,38 @@ class ID3Handler extends CodecHandler {
   /// The function decodes the text frame data based on the specified frame ID and encoding.
   /// It then extracts the relevant information and returns it as a string.
   /// If the encoding is unknown, it logs a warning and returns the decoded text using ISO-8859-1 encoding.
-  String _decodeTextFrame(Uint8List data) {
-    if (data.isEmpty) return '';
+  List<String> _decodeTextFrame(Uint8List data) {
+    if (data.isEmpty) return [];
     int encoding = data[0];
     Uint8List textData = data.sublist(1);
 
-    switch (encoding) {
-      case 0: // ISO-8859-1
-        return latin1.decode(textData).trim();
-      case 1: // UTF-16 with BOM
-        return _decodeUTF16(textData);
-      case 2: // UTF-16BE without BOM
-        return String.fromCharCodes(textData).trim();
-      case 3: // UTF-8
-        return utf8.decode(textData).trim();
-      default:
-        logger.w('Unknown text encoding: $encoding');
-        return latin1.decode(textData).trim();
+    List<String> decodedStrings = [];
+    try {
+      switch (encoding) {
+        case 0: // ISO-8859-1
+          decodedStrings = latin1.decode(textData).split('\x00');
+          break;
+        case 1: // UTF-16 with BOM
+        case 2: // UTF-16BE without BOM
+          decodedStrings = _decodeUTF16(textData).split('\u0000');
+          break;
+        case 3: // UTF-8
+          decodedStrings = utf8.decode(textData).split('\x00');
+          break;
+        default:
+          logger.w(
+              'Unknown text encoding: $encoding, falling back to ISO-8859-1');
+          decodedStrings = latin1.decode(textData).split('\x00');
+      }
+    } catch (e) {
+      logger.e('Error decoding text frame: $e');
+      // Fallback to Latin-1 in case of decoding errors
+      decodedStrings = latin1.decode(textData).split('\x00');
     }
+    return decodedStrings
+        .where((s) => s.isNotEmpty)
+        .map((s) => s.trim())
+        .toList();
   }
 
   /// Decodes the UTF-16 encoded data.
@@ -609,14 +670,21 @@ class ID3Handler extends CodecHandler {
   /// A [String] representing the decoded UTF-16 data.
   String _decodeUTF16(Uint8List data) {
     if (data.length < 2) return '';
-    Uint8List bom = data.sublist(0, 2);
-    if (bom[0] == 0xFF && bom[1] == 0xFE) {
-      return String.fromCharCodes(data.sublist(2).buffer.asUint16List()).trim();
-    } else if (bom[0] == 0xFE && bom[1] == 0xFF) {
-      return String.fromCharCodes(data.sublist(2).buffer.asUint16List()).trim();
-    } else {
-      return String.fromCharCodes(data).trim();
+    ByteData byteData = ByteData.view(data.buffer);
+
+    bool isLittleEndian = (data[0] == 0xFF && data[1] == 0xFE);
+    int offset = (data[0] == 0xFF || data[0] == 0xFE) ? 2 : 0;
+
+    List<int> codeUnits = [];
+    for (int i = offset; i < data.length; i += 2) {
+      if (i + 1 < data.length) {
+        int codeUnit = isLittleEndian
+            ? byteData.getUint16(i, Endian.little)
+            : byteData.getUint16(i, Endian.big);
+        codeUnits.add(codeUnit);
+      }
     }
+    return String.fromCharCodes(codeUnits);
   }
 
   /// Parses the comment frame data and sets the corresponding metadata.
@@ -728,6 +796,7 @@ class ID3Handler extends CodecHandler {
       }
 
       // If VBR header not found, use sampling method
+      // ignore: unused_local_variable
       int totalFrames = 0;
       int totalBitrate = 0;
       int samplesCount = 0;
@@ -811,7 +880,7 @@ class ID3Handler extends CodecHandler {
       file.setPositionSync(file.positionSync() - (10 - frameStart));
       Uint8List frameHeader = file.readSync(4);
       int version = (frameHeader[1] & 0x18) >> 3;
-      int layer = (frameHeader[1] & 0x06) >> 1;
+      // int layer = (frameHeader[1] & 0x06) >> 1;
       int sampleRate = _getSampleRate(version, (frameHeader[2] & 0x0C) >> 2);
 
       // Check for Xing/Info header
@@ -1482,6 +1551,7 @@ class ID3Handler extends CodecHandler {
     if (encodedFrame == null) {
       throw ID3Exception('Failed to encode metadata for key: $key');
     }
+    setMetadata(key, value);
 
     int existingIndex =
         _id3v2Tag.frames.indexWhere((frame) => frame.id == frameId);
@@ -1576,11 +1646,5 @@ class ID3Handler extends CodecHandler {
       (value >> 7) & 0x7F,
       value & 0x7F,
     ];
-  }
-}
-
-extension on Uint8List {
-  bool equals(Uint8List other) {
-    return ListEquality<int>().equals(other, this);
   }
 }
