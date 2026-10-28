@@ -51,3 +51,23 @@ class ID3v2Frame {
     this.data,
   );
 }
+
+class ID3v1Tag {
+  String title;
+  String artist;
+  String album;
+  String year;
+  String comment;
+  int? track;
+  String genre;
+
+  ID3v1Tag({
+    this.title = '',
+    this.artist = '',
+    this.album = '',
+    this.year = '',
+    this.comment = '',
+    this.track,
+    this.genre = '',
+  });
+}
