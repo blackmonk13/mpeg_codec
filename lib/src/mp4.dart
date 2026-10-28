@@ -472,7 +472,9 @@ class MP4Handler extends CodecHandler {
 
     if (meanAtom.type != 'mean' ||
         nameAtom.type != 'name' ||
-        dataAtom.type != 'data') return;
+        dataAtom.type != 'data') {
+      return;
+    }
 
     final meanString = utf8.decode(meanAtom.data!.sublist(4));
     final nameString = utf8.decode(nameAtom.data!.sublist(4));
@@ -930,7 +932,7 @@ class MP4Handler extends CodecHandler {
 
   /// Encodes the given metadata value into a byte list.
   ///
-  /// This function supports encoding metadata values of type String, int, bool, and List<int> with a length of 2.
+  /// This function supports encoding metadata values of type String, int, bool, and `List<int>` with a length of 2.
   ///
   /// Parameters:
   /// - value: The metadata value to encode.
