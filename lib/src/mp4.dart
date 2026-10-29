@@ -1,10 +1,17 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
+
+import 'package:logger/logger.dart';
 
 import 'atoms.dart';
 import 'exceptions.dart';
 import 'handler.dart';
+import 'metadata.dart';
+
+/// Where a part of the original file ends up in the file being written.
+typedef _Move = ({int start, int end, int newStart});
 
 /// A class responsible for handling MP4 file operations.
 /// This class extends the CodecHandler class and provides methods for parsing,
@@ -60,6 +67,20 @@ class MP4Handler extends CodecHandler {
 
   MP4Handler(super.filePath) {
     _setup();
+  }
+
+  /// Reads the metadata of the file at [path] in a separate isolate, so the
+  /// calling isolate (the UI isolate of a Flutter app, for example) is not
+  /// blocked by the file reads. Returns the same [Metadata] that
+  /// `MP4Handler(path).metadata` has.
+  ///
+  /// [Logger.level] is set per isolate, so the level in use here is passed on.
+  static Future<Metadata> readMetadata(String path) {
+    final level = Logger.level;
+    return Isolate.run(() {
+      Logger.level = level;
+      return MP4Handler(path).metadata;
+    });
   }
 
   /// Initializes the MP4Handler by performing the following steps:
@@ -197,8 +218,11 @@ class MP4Handler extends CodecHandler {
           atom.data = file.readSync(4); // Store the extra 4 bytes
         }
         _parseAtomRecursive(atom, childStart, offset + size);
-      } else if (type != 'mdat') {
-        // Read the data for atoms other than 'mdat'
+      } else if (type == 'mdat' || type == 'free' || type == 'skip') {
+        // Media data and padding are copied when the file is written, not kept
+        // in memory.
+        atom.streamed = true;
+      } else {
         file.setPositionSync(offset + headerSize);
         atom.data = file.readSync(size - headerSize);
       }
@@ -842,16 +866,18 @@ class MP4Handler extends CodecHandler {
   /// Writes the file, with the current atom tree, to [outputPath].
   ///
   /// `mdat` atoms are copied from the original file. If an `mdat` ends up at
-  /// a different position, the chunk offsets in the `stco` and `co64` atoms
-  /// are adjusted to match.
+  /// a different position, the offsets that point into the media are adjusted
+  /// to match: the chunk offsets (`stco` and `co64`), and in fragmented files
+  /// the `tfhd` base data offsets, the `sidx` first offsets and the `tfra`
+  /// `moof` offsets.
   @override
   Future<void> writeToFile(String outputPath) async {
     updateTreeSizes();
-    _writeTree(outputPath);
+    await _writeTree(outputPath);
     logger.d('File written successfully to: $outputPath');
   }
 
-  void _writeTree(String outputPath) {
+  Future<void> _writeTree(String outputPath) async {
     final topLevel = _root.children;
 
     // Where each top-level atom ends up in the output.
@@ -862,27 +888,24 @@ class MP4Handler extends CodecHandler {
       position += atom.size;
     }
 
-    final moves = <({int start, int end, int newStart})>[
-      for (final atom in topLevel.where((a) => a.type == 'mdat'))
-        (
-          start: atom.sourceOffset,
-          end: atom.sourceOffset + atom.size,
-          newStart: newOffsets[atom]!,
-        ),
+    // Offsets in the file point at media and fragments, never at the movie
+    // header or at padding.
+    final moves = <_Move>[
+      for (final atom in topLevel)
+        if (atom.type != 'moov' && atom.type != 'free' && atom.type != 'skip')
+          (
+            start: atom.sourceOffset,
+            end: atom.sourceOffset + atom.sourceSize,
+            newStart: newOffsets[atom]!,
+          ),
     ];
     final moved = moves.any((move) => move.start != move.newStart);
-
-    if (moved && topLevel.any((a) => a.type == 'moof' || a.type == 'sidx')) {
-      throw MP4Exception(
-        'Fragmented MP4 files cannot be rewritten: their offsets would change',
-      );
-    }
 
     final input = File(file.path).openSync(mode: FileMode.read);
     final output = File(outputPath).openSync(mode: FileMode.write);
     try {
       for (final atom in topLevel) {
-        _writeAtom(atom, input, output, moved ? moves : null);
+        await _writeAtom(atom, input, output, moved ? moves : null);
         final expectedEnd = newOffsets[atom]! + atom.size;
         if (output.positionSync() != expectedEnd) {
           throw MP4Exception(
@@ -898,26 +921,174 @@ class MP4Handler extends CodecHandler {
     }
   }
 
+  /// Whether the changed `moov` (and the padding around it) takes exactly the
+  /// space it took before, or `moov` is at the end of the file, so that
+  /// nothing else has to move.
+  bool _canWriteInPlace() {
+    var position = 0;
+    for (final atom in _root.children) {
+      final padding = atom.type == 'free' || atom.type == 'skip';
+      if (atom.type != 'moov' && !padding && atom.sourceOffset != position) {
+        return false;
+      }
+      position += atom.size;
+    }
+    return true;
+  }
+
+  /// Overwrites the changed `moov` atom and the padding next to it in the
+  /// file itself, leaving the media where it is. Only call it when
+  /// [_canWriteInPlace] is true.
+  Future<void> _writeInPlace() async {
+    final output = File(file.path).openSync(mode: FileMode.append);
+    try {
+      var position = 0;
+      for (final atom in _root.children) {
+        final padding = atom.type == 'free' || atom.type == 'skip';
+        final unchanged = padding &&
+            atom.sourceOffset == position &&
+            atom.sourceSize == atom.size;
+        if ((atom.type == 'moov' || padding) && !unchanged) {
+          output.setPositionSync(position);
+          await _writeAtom(atom, null, output, null);
+        }
+        position += atom.size;
+      }
+
+      final trailing = _root.trailingData;
+      if (trailing != null) {
+        output.setPositionSync(position);
+        output.writeFromSync(trailing);
+        position += trailing.length;
+      }
+      output.truncateSync(position); // `moov` at the end can get shorter
+      output.flushSync();
+    } finally {
+      output.closeSync();
+    }
+  }
+
+  /// How big the `free` atom is that is left after `moov` when the media has
+  /// to move anyway, so that later edits can be made in place.
+  static const int freePadding = 1024;
+
+  /// Changes the `free` atom at [index] in [siblings] so that the atoms
+  /// before it can take up [delta] more bytes without anything after it
+  /// moving. Without a `free` atom there, a new one is made when the atoms
+  /// shrank. Returns `false`, having changed nothing, when that is not possible.
+  /// Each change adds a function to [undo].
+  bool _absorbSize(List<Atom> siblings, int index, int delta, List<void Function()> undo) {
+    if (delta == 0) return true;
+
+    final next = index < siblings.length ? siblings[index] : null;
+    if (next != null && (next.type == 'free' || next.type == 'skip')) {
+      final newSize = next.size - delta;
+      if (newSize == 0) {
+        siblings.removeAt(index);
+        undo.add(() => siblings.insert(index, next));
+        return true;
+      }
+      if (newSize >= next.headerSize) {
+        final oldSize = next.size;
+        next.size = newSize;
+        undo.add(() => next.size = oldSize);
+        return true;
+      }
+      return false;
+    }
+
+    if (delta < 0 && -delta >= 8) {
+      final padding = Atom('free', -delta, 0)..streamed = true;
+      siblings.insert(index, padding);
+      undo.add(() => siblings.remove(padding));
+      return true;
+    }
+    return false;
+  }
+
+  /// Keeps the file layout as it was, by taking the change in size of the
+  /// metadata out of (or adding it to) a `free` atom: the one after `ilst` in
+  /// `meta` first, then the one after `moov`. When that does not work and
+  /// something follows `moov`, the media has to move anyway, so some padding
+  /// is left after `moov` for the next edit.
+  void _absorbSizeChange(
+    Atom moov,
+    Atom ilst, {
+    required int oldMoovSize,
+    required int? oldIlstSize,
+    required List<void Function()> undo,
+  }) {
+    // With `moov` at the end nothing follows it, so it can simply grow or
+    // shrink.
+    final top = _root.children;
+    final at = top.indexWhere((a) => identical(a, moov));
+    if (at == -1 || at == top.length - 1) return;
+
+    if (oldIlstSize != null) {
+      final meta = findAtomByPath(['moov', 'udta', 'meta']);
+      final inMeta = meta?.children.indexWhere((a) => identical(a, ilst)) ?? -1;
+      if (meta != null &&
+          inMeta != -1 &&
+          _absorbSize(meta.children, inMeta + 1, ilst.size - oldIlstSize, undo)) {
+        updateTreeSizes();
+        return;
+      }
+    }
+
+    if (_absorbSize(top, at + 1, moov.size - oldMoovSize, undo)) {
+      updateTreeSizes();
+      return;
+    }
+
+    final next = top[at + 1];
+    if (next.type == 'free' || next.type == 'skip') {
+      final oldSize = next.size;
+      next.size = freePadding;
+      undo.add(() => next.size = oldSize);
+    } else {
+      final padding = Atom('free', freePadding, 0)..streamed = true;
+      top.insert(at + 1, padding);
+      undo.add(() => top.remove(padding));
+    }
+    updateTreeSizes();
+  }
+
   void _writeTrailingBytes(Atom atom, RandomAccessFile output) {
     final trailing = atom.trailingData;
     if (trailing != null) output.writeFromSync(trailing);
   }
 
-  void _writeAtom(
+  /// Writes [atom] and its children. [input] is the original file, which the
+  /// media data is copied from; it can be `null` when the atom has none.
+  Future<void> _writeAtom(
     Atom atom,
-    RandomAccessFile input,
+    RandomAccessFile? input,
     RandomAccessFile output,
-    List<({int start, int end, int newStart})>? moves,
-  ) {
+    List<_Move>? moves,
+  ) async {
     output.writeFromSync(_atomHeader(atom));
 
-    if (atom.type == 'mdat' && atom.data == null && atom.children.isEmpty) {
-      _copyRange(
-        input,
-        atom.sourceOffset + atom.headerSize,
-        atom.size - atom.headerSize,
-        output,
-      );
+    if ((atom.type == 'mdat' || atom.streamed) &&
+        atom.data == null &&
+        atom.children.isEmpty) {
+      final length = atom.size - atom.headerSize;
+      if (atom.type == 'mdat') {
+        if (input == null) {
+          throw MP4Exception('Cannot copy media data without the input file');
+        }
+        await _copyRange(
+          input,
+          atom.sourceOffset + atom.headerSize,
+          length,
+          output,
+        );
+      } else {
+        // Padding has no meaning, so it is written as zeros.
+        final zeros = Uint8List(64 * 1024);
+        for (var left = length; left > 0; left -= zeros.length) {
+          output.writeFromSync(zeros, 0, left < zeros.length ? left : zeros.length);
+        }
+      }
     } else if (atom.type == 'meta') {
       // The version and flags that come before the children of a 'meta' atom.
       final flags = atom.data;
@@ -925,19 +1096,17 @@ class MP4Handler extends CodecHandler {
         flags != null && flags.length == 4 ? flags : Uint8List(4),
       );
       for (final child in atom.children) {
-        _writeAtom(child, input, output, moves);
+        await _writeAtom(child, input, output, moves);
       }
       _writeTrailingBytes(atom, output);
     } else if (atom.data != null) {
-      // 'trak' atoms are kept as raw data, which includes their chunk offsets.
+      // These atoms are kept as raw data, which includes offsets into the file.
       output.writeFromSync(
-        atom.type == 'trak' && moves != null
-            ? _patchChunkOffsets(atom.data!, moves)
-            : atom.data!,
+        moves == null ? atom.data! : _patchedPayload(atom, moves),
       );
     } else {
       for (final child in atom.children) {
-        _writeAtom(child, input, output, moves);
+        await _writeAtom(child, input, output, moves);
       }
       _writeTrailingBytes(atom, output);
     }
@@ -965,17 +1134,17 @@ class MP4Handler extends CodecHandler {
     return header.buffer.asUint8List();
   }
 
-  void _copyRange(
+  Future<void> _copyRange(
     RandomAccessFile input,
     int start,
     int length,
     RandomAccessFile output,
-  ) {
-    input.setPositionSync(start);
+  ) async {
+    await input.setPosition(start);
     final buffer = Uint8List(1024 * 1024);
     var remaining = length;
     while (remaining > 0) {
-      final read = input.readIntoSync(
+      final read = await input.readInto(
         buffer,
         0,
         remaining < buffer.length ? remaining : buffer.length,
@@ -983,65 +1152,92 @@ class MP4Handler extends CodecHandler {
       if (read == 0) {
         throw MP4Exception('Unexpected end of file while copying media data');
       }
-      output.writeFromSync(buffer, 0, read);
+      await output.writeFrom(buffer, 0, read);
       remaining -= read;
     }
   }
 
-  /// Returns a copy of the 'trak' payload [trak] with every chunk offset in
-  /// its `stco` and `co64` atoms moved along with the `mdat` it points into.
-  Uint8List _patchChunkOffsets(
-    Uint8List trak,
-    List<({int start, int end, int newStart})> moves,
+  /// The payload of the raw [atom] with the offsets in it that point into the
+  /// file moved along with what they point at.
+  Uint8List _patchedPayload(Atom atom, List<_Move> moves) {
+    switch (atom.type) {
+      case 'trak':
+        return _patchChunkOffsets(atom.data!, moves);
+      case 'moof':
+        return _patchFragmentHeaders(atom.data!, moves);
+      case 'mfra':
+        return _patchRandomAccess(atom.data!, moves);
+      case 'sidx':
+        return _patchSegmentIndex(atom, moves);
+      default:
+        return atom.data!;
+    }
+  }
+
+  /// Where the byte at [offset] of the original file ends up.
+  int _remap(int offset, List<_Move> moves) {
+    for (final move in moves) {
+      if (offset >= move.start && offset < move.end) {
+        return offset - move.start + move.newStart;
+      }
+    }
+    logger.w('Offset $offset is not inside any atom that is written');
+    return offset;
+  }
+
+  /// The boxes between [start] and [end] in [data].
+  List<({String type, int body, int end})> _boxes(
+    Uint8List data,
+    int start,
+    int end,
   ) {
+    final view = ByteData.sublistView(data);
+    final boxes = <({String type, int body, int end})>[];
+    var position = start;
+    while (position + 8 <= end) {
+      var size = view.getUint32(position);
+      final type = latin1.decode(data.sublist(position + 4, position + 8));
+      var headerSize = 8;
+      if (size == 1) {
+        if (position + 16 > end) break;
+        size = view.getUint64(position + 8);
+        headerSize = 16;
+      } else if (size == 0) {
+        size = end - position;
+      }
+      if (size < headerSize || position + size > end) break;
+      boxes.add((type: type, body: position + headerSize, end: position + size));
+      position += size;
+    }
+    return boxes;
+  }
+
+  /// Returns a copy of the 'trak' payload [trak] with every chunk offset in
+  /// its `stco` and `co64` atoms moved along with what it points into.
+  Uint8List _patchChunkOffsets(Uint8List trak, List<_Move> moves) {
     final patched = Uint8List.fromList(trak);
     final view = ByteData.sublistView(patched);
 
-    int remap(int offset) {
-      for (final move in moves) {
-        if (offset >= move.start && offset < move.end) {
-          return offset - move.start + move.newStart;
-        }
-      }
-      logger.w('Chunk offset $offset is not inside any mdat atom');
-      return offset;
-    }
-
     void walk(int start, int end) {
-      var position = start;
-      while (position + 8 <= end) {
-        var size = view.getUint32(position);
-        final type = latin1.decode(patched.sublist(position + 4, position + 8));
-        var headerSize = 8;
-        if (size == 1) {
-          if (position + 16 > end) return;
-          size = view.getUint64(position + 8);
-          headerSize = 16;
-        } else if (size == 0) {
-          size = end - position;
-        }
-        if (size < headerSize || position + size > end) return;
-
-        final bodyStart = position + headerSize;
-        final boxEnd = position + size;
-        switch (type) {
+      for (final box in _boxes(patched, start, end)) {
+        switch (box.type) {
           case 'mdia':
           case 'minf':
           case 'stbl':
-            walk(bodyStart, boxEnd);
+            walk(box.body, box.end);
             break;
           case 'stco':
           case 'co64':
-            final wide = type == 'co64';
+            final wide = box.type == 'co64';
             final width = wide ? 8 : 4;
             // Version and flags, then the entry count, then the entries.
-            final count = view.getUint32(bodyStart + 4);
-            final entries = bodyStart + 8;
-            if (entries + count * width > boxEnd) return;
+            final count = view.getUint32(box.body + 4);
+            final entries = box.body + 8;
+            if (entries + count * width > box.end) break;
             for (var i = 0; i < count; i++) {
               final at = entries + i * width;
               final old = wide ? view.getUint64(at) : view.getUint32(at);
-              final moved = remap(old);
+              final moved = _remap(old, moves);
               if (wide) {
                 view.setUint64(at, moved);
               } else if (moved > 0xFFFFFFFF) {
@@ -1054,11 +1250,91 @@ class MP4Handler extends CodecHandler {
             }
             break;
         }
-        position += size;
       }
     }
 
     walk(0, patched.length);
+    return patched;
+  }
+
+  /// The `moof` payload with the base data offset moved, in each `tfhd` that
+  /// has one. (The offsets in `trun` are relative to the `moof`, so they stay
+  /// right when it moves together with its `mdat`.)
+  Uint8List _patchFragmentHeaders(Uint8List moof, List<_Move> moves) {
+    final patched = Uint8List.fromList(moof);
+    final view = ByteData.sublistView(patched);
+
+    for (final traf in _boxes(patched, 0, patched.length)) {
+      if (traf.type != 'traf') continue;
+      for (final tfhd in _boxes(patched, traf.body, traf.end)) {
+        if (tfhd.type != 'tfhd' || tfhd.body + 16 > tfhd.end) continue;
+        // Version and flags, the track ID, then the base data offset if flag
+        // 0x1 is set.
+        if (view.getUint32(tfhd.body) & 0x1 == 0) continue;
+        final at = tfhd.body + 8;
+        view.setUint64(at, _remap(view.getUint64(at), moves));
+      }
+    }
+    return patched;
+  }
+
+  /// The `mfra` payload with the `moof` offsets in its `tfra` boxes moved.
+  Uint8List _patchRandomAccess(Uint8List mfra, List<_Move> moves) {
+    final patched = Uint8List.fromList(mfra);
+    final view = ByteData.sublistView(patched);
+
+    for (final tfra in _boxes(patched, 0, patched.length)) {
+      if (tfra.type != 'tfra' || tfra.body + 16 > tfra.end) continue;
+      final wide = patched[tfra.body] == 1;
+      final sizes = view.getUint32(tfra.body + 8);
+      final count = view.getUint32(tfra.body + 12);
+      final field = wide ? 8 : 4;
+      // Time and offset, then the traf, trun and sample numbers.
+      final entry = 2 * field +
+          (((sizes >> 4) & 3) + 1) +
+          (((sizes >> 2) & 3) + 1) +
+          ((sizes & 3) + 1);
+      final first = tfra.body + 16;
+      if (first + count * entry > tfra.end) continue;
+
+      for (var i = 0; i < count; i++) {
+        final at = first + i * entry + field;
+        if (wide) {
+          view.setUint64(at, _remap(view.getUint64(at), moves));
+        } else {
+          view.setUint32(at, _remap(view.getUint32(at), moves));
+        }
+      }
+    }
+    return patched;
+  }
+
+  /// The `sidx` payload with its first offset, which is relative to the end
+  /// of the `sidx`, changed to reach the same place in the new file.
+  Uint8List _patchSegmentIndex(Atom sidx, List<_Move> moves) {
+    final data = sidx.data!;
+    final wide = data.isNotEmpty && data[0] == 1;
+    final at = wide ? 20 : 16; // after version, flags, IDs and the start time
+    final width = wide ? 8 : 4;
+    if (data.length < at + width) return data;
+
+    final matches = moves.where((m) => m.start == sidx.sourceOffset);
+    if (matches.isEmpty) return data;
+
+    final patched = Uint8List.fromList(data);
+    final view = ByteData.sublistView(patched);
+    final first = wide ? view.getUint64(at) : view.getUint32(at);
+
+    final target = _remap(sidx.sourceOffset + sidx.sourceSize + first, moves);
+    final newFirst = target - (matches.first.newStart + sidx.size);
+    if (newFirst < 0 || (!wide && newFirst > 0xFFFFFFFF)) {
+      throw MP4Exception('The sidx offset $newFirst does not fit');
+    }
+    if (wide) {
+      view.setUint64(at, newFirst);
+    } else {
+      view.setUint32(at, newFirst);
+    }
     return patched;
   }
 
@@ -1291,10 +1567,19 @@ class MP4Handler extends CodecHandler {
   /// created. The file is only replaced once the new one has been written
   /// completely, so a failure leaves the original untouched.
   ///
+  /// A size change of the metadata is taken out of (or added to) a `free`
+  /// atom next to it where there is one. When nothing else has to move and
+  /// [inPlace] is true, only the `moov` atom and the padding are overwritten
+  /// in the file itself, which is much faster for big files; a failure of
+  /// the disk half way through that write could then leave a damaged `moov`,
+  /// so pass `inPlace: false` to always write a new file and rename it
+  /// instead. When the media has to move, [freePadding] bytes of padding are
+  /// left after `moov` so the next edit can be made in place.
+  ///
   /// Throws an [MP4Exception] if a value cannot be encoded or the file cannot
   /// be written.
   @override
-  Future<void> applyMetadataChanges() async {
+  Future<void> applyMetadataChanges({bool inPlace = true}) async {
     if (pendingOperations.isEmpty) {
       logger.i('No pending metadata operations to apply.');
       return;
@@ -1307,10 +1592,21 @@ class MP4Handler extends CodecHandler {
 
     // Work on a copy of the items so that a bad value changes nothing.
     final existingIlst = findAtomByPath(['moov', 'udta', 'meta', 'ilst']);
+    final oldIlstSize = existingIlst?.size;
+    final oldMoovSize = moov.size;
     final items = List<Atom>.of(existingIlst?.children ?? []);
-    for (final operation in pendingOperations) {
+    final operations = List<MetadataOperation>.of(pendingOperations);
+    for (final operation in operations) {
       switch (operation.type) {
         case OperationType.add:
+          // Adding cover art keeps the covers that are already there.
+          if (_friendlyToAtomNames[operation.key] == 'covr' ||
+              operation.key == 'covr') {
+            _appendCovers(items, operation.key, operation.value);
+          } else {
+            _addOrUpdateItem(items, operation.key, operation.value);
+          }
+          break;
         case OperationType.update:
           _addOrUpdateItem(items, operation.key, operation.value);
           break;
@@ -1328,7 +1624,19 @@ class MP4Handler extends CodecHandler {
       undo.add(() => ilst.children = previous);
 
       updateTreeSizes();
-      _safeWrite();
+      _absorbSizeChange(
+        moov,
+        ilst,
+        oldMoovSize: oldMoovSize,
+        oldIlstSize: existingIlst == null ? null : oldIlstSize,
+        undo: undo,
+      );
+
+      if (inPlace && _canWriteInPlace()) {
+        await _writeInPlace();
+      } else {
+        await _safeWrite();
+      }
     } catch (e) {
       for (final step in undo.reversed) {
         step();
@@ -1337,8 +1645,25 @@ class MP4Handler extends CodecHandler {
       throw MP4Exception('Failed to apply metadata changes: $e');
     }
 
-    pendingOperations.clear();
+    // Operations queued while the file was being written stay queued.
+    pendingOperations.removeWhere(operations.contains);
     _setup(); // Reopen the file and rebuild the atom tree
+  }
+
+  /// Adds the image(s) in [value] after the covers already in [items].
+  void _appendCovers(List<Atom> items, String key, dynamic value) {
+    final encoded = encodeMetadataAtom(key, value)!;
+    final index = items.indexWhere((atom) => _matchesKey(atom, key));
+    if (index == -1) {
+      items.add(encoded);
+      return;
+    }
+    // Copy the atom: the original belongs to the tree until the write is done.
+    final existing = items[index];
+    final merged = Atom(existing.type, 0, 0)
+      ..children.addAll([...existing.children, ...encoded.children]);
+    merged.updateSize();
+    items[index] = merged;
   }
 
   void _addOrUpdateItem(List<Atom> items, String key, dynamic value) {
@@ -1388,12 +1713,12 @@ class MP4Handler extends CodecHandler {
 
   /// Writes the updated file next to the original and renames it over the
   /// original, so the original is never half-written.
-  void _safeWrite() {
+  Future<void> _safeWrite() async {
     final path = file.path;
     final tempFile = File('$path.tmp');
     try {
-      _writeTree(tempFile.path);
-      tempFile.renameSync(path);
+      await _writeTree(tempFile.path);
+      await tempFile.rename(path);
     } catch (e) {
       logger.e('Error during file write: $e');
       if (tempFile.existsSync()) tempFile.deleteSync();
