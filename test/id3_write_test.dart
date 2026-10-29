@@ -38,24 +38,55 @@ List<int> utf8Text(String text) => [3, ...utf8.encode(text)];
 
 List<int> latin1Text(String text) => [0, ...latin1.encode(text)];
 
-List<int> id3Tag(int version, List<List<int>> frames, {int padding = 0}) {
+List<int> uint32be(int value) => [
+      (value >> 24) & 0xFF,
+      (value >> 16) & 0xFF,
+      (value >> 8) & 0xFF,
+      value & 0xFF,
+    ];
+
+List<int> id3Tag(
+  int version,
+  List<List<int>> frames, {
+  int padding = 0,
+  bool footer = false,
+}) {
   final body = [for (final f in frames) ...f, ...List.filled(padding, 0)];
   return [
     ...ascii.encode('ID3'),
     version,
     0,
-    0,
+    footer ? 0x10 : 0,
     ...syncSafe(body.length),
     ...body,
+    if (footer) ...[
+      ...ascii.encode('3DI'),
+      version,
+      0,
+      0x10,
+      ...syncSafe(body.length),
+    ],
   ];
 }
 
-/// A 128-byte ID3v1 tag.
-List<int> id3v1Tag() {
+/// A 128-byte ID3v1.1 tag.
+Uint8List id3v1Tag() {
   final tag = Uint8List(128);
   tag.setRange(0, 3, ascii.encode('TAG'));
   tag.setRange(3, 3 + 6, ascii.encode('Old v1'));
+  tag.setRange(33, 33 + 10, ascii.encode('Old artist'));
+  tag.setRange(63, 63 + 9, ascii.encode('Old album'));
+  tag.setRange(93, 93 + 4, ascii.encode('1990'));
+  tag.setRange(97, 97 + 11, ascii.encode('Old comment'));
+  tag[126] = 4; // track
+  tag[127] = 17; // Rock
   return tag;
+}
+
+String zeroTerminated(Uint8List bytes, int start, int length) {
+  final field = bytes.sublist(start, start + length);
+  final end = field.indexOf(0);
+  return latin1.decode(end == -1 ? field : field.sublist(0, end));
 }
 
 /// The frames of the ID3v2 tag at the start of [bytes], as id -> bodies, plus
@@ -170,7 +201,8 @@ void main() {
       expect(reread.getMetadata<String>('album'), '日本語');
     });
 
-    test('does not duplicate an existing ID3v1 tag', () async {
+    test('does not duplicate an existing ID3v1 tag, and keeps it consistent',
+        () async {
       final v1 = id3v1Tag();
       final file = writeFile([
         ...id3Tag(4, [frame('TIT2', utf8Text('Old title'), 4)]),
@@ -179,12 +211,49 @@ void main() {
       ]);
 
       final handler = ID3Handler(file.path);
-      handler.updateMetadata({'title': 'New title'});
+      handler.updateMetadata({
+        'title': 'New title',
+        'year': '1999',
+        'genre': 'Jazz',
+        'track': [7, 12],
+      });
       await handler.applyMetadataChanges();
 
       final bytes = file.readAsBytesSync();
       final tag = readTag(bytes);
-      expect(bytes.sublist(tag.audioStart), [...audio, ...v1]);
+      expect(bytes.length, tag.audioStart + audio.length + 128);
+      expect(
+        bytes.sublist(tag.audioStart, tag.audioStart + audio.length),
+        audio,
+      );
+
+      final tail = bytes.sublist(bytes.length - 128);
+      expect(zeroTerminated(tail, 0, 3), 'TAG');
+      expect(zeroTerminated(tail, 3, 30), 'New title');
+      expect(zeroTerminated(tail, 63, 30), 'Old album'); // not changed
+      expect(zeroTerminated(tail, 93, 4), '1999');
+      expect(zeroTerminated(tail, 97, 28), 'Old comment'); // not changed
+      expect(tail[126], 7);
+      expect(tail[127], 8); // Jazz
+    });
+
+    test('blanks the ID3v1 fields of a removed key', () async {
+      final file = writeFile([
+        ...id3Tag(4, [frame('TIT2', utf8Text('Old title'), 4)]),
+        ...audio,
+        ...id3v1Tag(),
+      ]);
+
+      final handler = ID3Handler(file.path);
+      handler.removeMetadata(['artist', 'genre', 'track']);
+      await handler.applyMetadataChanges();
+
+      final bytes = file.readAsBytesSync();
+      final tail = bytes.sublist(bytes.length - 128);
+      expect(zeroTerminated(tail, 33, 30), '');
+      expect(tail[126], 0);
+      expect(tail[127], 255);
+      expect(zeroTerminated(tail, 3, 30), 'Old v1'); // not changed
     });
 
     test('does not add an ID3v1 tag to a file that had none', () async {
@@ -229,6 +298,21 @@ void main() {
       await handler.applyMetadataChanges();
 
       final bytes = file.readAsBytesSync();
+      expect(bytes.sublist(readTag(bytes).audioStart), audio);
+    });
+
+    test('skips the footer of the old tag', () async {
+      final file = writeFile([
+        ...id3Tag(4, [frame('TIT2', utf8Text('Old title'), 4)], footer: true),
+        ...audio,
+      ]);
+
+      final handler = ID3Handler(file.path);
+      handler.updateMetadata({'title': 'New title'});
+      await handler.applyMetadataChanges();
+
+      final bytes = file.readAsBytesSync();
+      expect(bytes[5], 0, reason: 'the footer flag must be cleared');
       expect(bytes.sublist(readTag(bytes).audioStart), audio);
     });
 
@@ -403,6 +487,338 @@ void main() {
     });
   });
 
+  group('more frames', () {
+    test('year is readable again after it is written to TDRC', () async {
+      final file = writeFile([
+        ...id3Tag(4, [frame('TIT2', utf8Text('t'), 4)]),
+        ...audio,
+      ]);
+
+      final handler = ID3Handler(file.path);
+      handler.updateMetadata({'year': '1999'});
+      await handler.applyMetadataChanges();
+
+      expect(handler.getMetadata<String>('year'), '1999');
+      expect(handler.getMetadata<String>('recordingTime'), '1999');
+    });
+
+    test('year is the first four digits of a full recording date', () {
+      final file = writeFile([
+        ...id3Tag(4, [frame('TDRC', utf8Text('2001-05-03'), 4)]),
+        ...audio,
+      ]);
+
+      final handler = ID3Handler(file.path);
+      expect(handler.getMetadata<String>('year'), '2001');
+      expect(handler.getMetadata<String>('recordingTime'), '2001-05-03');
+    });
+
+    test('user text frames are told apart by description', () async {
+      final file = writeFile(audio);
+
+      final handler = ID3Handler(file.path);
+      handler.addMetadata({'TXXX:Mood': 'calm', 'TXXX:Source': 'vinyl'});
+      await handler.applyMetadataChanges();
+
+      handler.updateMetadata({'TXXX:Mood': 'lively'});
+      await handler.applyMetadataChanges();
+
+      var frames = readTag(file.readAsBytesSync()).frames['TXXX']!;
+      expect(
+        frames.map((f) => utf8.decode(f.sublist(1))).toList(),
+        ['Mood\x00lively', 'Source\x00vinyl'],
+      );
+
+      handler.removeMetadata(['TXXX:Source']);
+      await handler.applyMetadataChanges();
+      frames = readTag(file.readAsBytesSync()).frames['TXXX']!;
+      expect(frames, hasLength(1));
+      expect(utf8.decode(frames.single.sublist(1)), 'Mood\x00lively');
+    });
+
+    test('writes a user text frame given as a map, as reading produces it',
+        () async {
+      final file = writeFile(audio);
+
+      final handler = ID3Handler(file.path);
+      handler.addMetadata({
+        'userDefinedText': {'description': 'Mood', 'value': 'calm'},
+      });
+      await handler.applyMetadataChanges();
+
+      expect(
+        handler.getMetadata<Map<String, dynamic>>('userDefinedText'),
+        {'description': 'Mood', 'value': 'calm'},
+      );
+    });
+
+    test('writes and reads a rating, and keeps other owners', () async {
+      final other = [...ascii.encode('someone@example.com'), 0, 64, 0, 0, 0, 1];
+      final file = writeFile([
+        ...id3Tag(4, [frame('POPM', other, 4)]),
+        ...audio,
+      ]);
+
+      final handler = ID3Handler(file.path);
+      handler.updateMetadata({'rating': 200});
+      await handler.applyMetadataChanges();
+
+      expect(handler.getMetadata<int>('rating'), 200);
+      var popm = readTag(file.readAsBytesSync()).frames['POPM']!;
+      expect(popm, hasLength(2));
+
+      handler.removeMetadata(['rating']);
+      await handler.applyMetadataChanges();
+      popm = readTag(file.readAsBytesSync()).frames['POPM']!;
+      expect(popm.single, other);
+    });
+
+    test('an out-of-range rating throws', () async {
+      final file = writeFile(audio);
+
+      final handler = ID3Handler(file.path);
+      handler.updateMetadata({'rating': 300});
+
+      await expectLater(
+        handler.applyMetadataChanges(),
+        throwsA(isA<ID3Exception>()),
+      );
+    });
+
+    test('writes several pictures and reads them all', () async {
+      final file = writeFile(audio);
+      final front = Uint8List.fromList([0xFF, 0xD8, 0xFF, 1, 2, 3]);
+      final back = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 4, 5, 6]);
+
+      final handler = ID3Handler(file.path);
+      handler.addMetadata({
+        'picture': [
+          front,
+          {'data': back, 'pictureType': 4, 'description': 'Back'},
+        ],
+      });
+      await handler.applyMetadataChanges();
+
+      expect(readTag(file.readAsBytesSync()).frames['APIC'], hasLength(2));
+      final pictures = handler.getMetadata<List>('pictures')!;
+      expect(pictures, hasLength(2));
+      expect(pictures[0]['data'], front);
+      expect(pictures[0]['mimeType'], 'image/jpeg');
+      expect(pictures[1]['data'], back);
+      expect(pictures[1]['mimeType'], 'image/png');
+      expect(pictures[1]['pictureType'], 4);
+      expect(pictures[1]['description'], 'Back');
+    });
+
+    test('a picture read from one file can be written to another', () async {
+      final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 9, 9, 9]);
+      final source = writeFile([
+        ...id3Tag(4, [
+          frame('APIC', [
+            0, ...ascii.encode('image/jpeg'), 0, 3, ...ascii.encode('Art'), 0,
+            ...jpeg,
+          ], 4),
+        ]),
+        ...audio,
+      ]);
+      final target = writeFile(audio);
+
+      final picture = ID3Handler(source.path).getMetadata<Map>('picture')!;
+      final handler = ID3Handler(target.path);
+      handler.addMetadata({'picture': picture});
+      await handler.applyMetadataChanges();
+
+      final reread = ID3Handler(target.path).getMetadata<Map>('picture')!;
+      expect(reread['data'], jpeg);
+      expect(reread['description'], 'Art');
+    });
+
+    test('a comment read from a file can be written back', () async {
+      final file = writeFile([
+        ...id3Tag(4, [
+          frame('COMM', [
+            3, ...ascii.encode('fra'), ...utf8.encode('note'), 0,
+            ...utf8.encode('bonjour'),
+          ], 4),
+        ]),
+        ...audio,
+      ]);
+
+      final handler = ID3Handler(file.path);
+      final comment = handler.getMetadata<Map>('comment')!;
+      expect(comment['language'], 'fra');
+      handler.updateMetadata({'comment': comment});
+      await handler.applyMetadataChanges();
+
+      expect(handler.getMetadata<Map>('comment'), comment);
+    });
+  });
+
+  group('reading', () {
+    test('reads frames whose last string is not terminated', () {
+      final file = writeFile([
+        ...id3Tag(4, [
+          frame('USLT', [
+            3, ...ascii.encode('eng'), ...utf8.encode('d'), 0,
+            ...utf8.encode('la la la'),
+          ], 4),
+          frame('TXXX', [3, ...utf8.encode('Mood'), 0, ...utf8.encode('calm')], 4),
+        ]),
+        ...audio,
+      ]);
+
+      final handler = ID3Handler(file.path);
+      expect(handler.getMetadata<Map>('unsynchronizedLyrics')!['text'], 'la la la');
+      expect(
+        handler.getMetadata<Map>('userDefinedText'),
+        {'description': 'Mood', 'value': 'calm'},
+      );
+    });
+  });
+
+  group('duration', () {
+    // MPEG-1 layer III, 128 kbps, 44.1 kHz, stereo: 417 bytes per frame.
+    List<int> mp3Frame({List<int> inside = const []}) {
+      final frame = List<int>.filled(417, 0);
+      frame.setRange(0, 4, [0xFF, 0xFB, 0x90, 0x00]);
+      frame.setRange(36, 36 + inside.length, inside);
+      return frame;
+    }
+
+    test('of a constant bitrate file comes from its size and bitrate', () {
+      final file = writeFile([
+        ...id3Tag(3, [frame('TIT2', latin1Text('t'), 3)], padding: 50),
+        for (var i = 0; i < 100; i++) ...mp3Frame(),
+      ]);
+
+      // 100 frames of 417 bytes at 128 kbps.
+      expect(
+        ID3Handler(file.path).getMetadata<int>('duration'),
+        closeTo(100 * 417 * 8 / 128, 1),
+      );
+    });
+
+    test('does not count an ID3v1 tag as audio', () {
+      final file = writeFile([
+        ...id3Tag(3, [frame('TIT2', latin1Text('t'), 3)]),
+        for (var i = 0; i < 100; i++) ...mp3Frame(),
+        ...id3v1Tag(),
+      ]);
+
+      expect(
+        ID3Handler(file.path).getMetadata<int>('duration'),
+        closeTo(100 * 417 * 8 / 128, 1),
+      );
+    });
+
+    test('of a file with a Xing header comes from the frame count', () {
+      final xing = [
+        ...ascii.encode('Xing'), 0, 0, 0, 1, // flags: frame count present
+        ...uint32be(250),
+      ];
+      final file = writeFile([
+        ...mp3Frame(inside: xing),
+        for (var i = 0; i < 10; i++) ...mp3Frame(),
+      ]);
+
+      // 250 frames of 1152 samples at 44.1 kHz.
+      expect(
+        ID3Handler(file.path).getMetadata<int>('duration'),
+        (250 * 1152 * 1000 / 44100).round(),
+      );
+    });
+
+    test('of an MPEG-2 layer III file uses 576 samples per frame', () {
+      // MPEG-2 layer III, 64 kbps, 22.05 kHz, mono: 208 bytes per frame.
+      List<int> frame2() {
+        final frame = List<int>.filled(208, 0);
+        frame.setRange(0, 4, [0xFF, 0xF3, 0x80, 0xC0]);
+        return frame;
+      }
+
+      final file = writeFile([
+        for (var i = 0; i < 20; i++) ...frame2(),
+      ]);
+
+      expect(
+        ID3Handler(file.path).getMetadata<int>('duration'),
+        closeTo(20 * 208 * 8 / 64, 1),
+      );
+    });
+
+    test('is not set for a file without audio frames', () {
+      final file = writeFile(audio);
+
+      expect(ID3Handler(file.path).metadata.contains('duration'), isFalse);
+    });
+  });
+
+  group('ID3v1', () {
+    test('only fills in what the ID3v2 tag does not have', () {
+      final longTitle = 'A title that is longer than thirty characters';
+      final file = writeFile([
+        ...id3Tag(4, [
+          frame('TIT2', utf8Text(longTitle), 4),
+          frame('TPE1', utf8Text('V2 artist'), 4),
+        ]),
+        ...audio,
+        ...id3v1Tag(), // title 'Old v1', artist 'Old artist', album 'Old album'
+      ]);
+
+      final handler = ID3Handler(file.path);
+      expect(handler.getMetadata<String>('title'), longTitle);
+      expect(handler.getMetadata<String>('artist'), 'V2 artist');
+      expect(handler.getMetadata<String>('album'), 'Old album');
+      expect(handler.getMetadata<int>('track'), 4);
+    });
+
+    test('empty ID3v1 fields do not replace anything', () {
+      final v1 = id3v1Tag()
+        ..fillRange(3, 33, 0) // title
+        ..[127] = 255; // genre
+      final file = writeFile([
+        ...id3Tag(4, [
+          frame('TIT2', utf8Text('V2 title'), 4),
+          frame('TCON', utf8Text('Jazz'), 4),
+        ]),
+        ...audio,
+        ...v1,
+      ]);
+
+      final handler = ID3Handler(file.path);
+      expect(handler.getMetadata<String>('title'), 'V2 title');
+      expect(handler.getMetadata<String>('genre'), 'Jazz');
+    });
+
+    test('no genre and no title mean no keys', () {
+      final v1 = id3v1Tag()
+        ..fillRange(3, 33, 0)
+        ..[127] = 255;
+      final file = writeFile([...audio, ...v1]);
+
+      final handler = ID3Handler(file.path);
+      expect(handler.metadata.contains('title'), isFalse);
+      expect(handler.metadata.contains('genre'), isFalse);
+    });
+
+    test('a file shorter than an ID3v1 tag is not a problem', () {
+      final file = writeFile([1, 2, 3, 4, 5]);
+
+      expect(ID3Handler(file.path).metadata.contains('title'), isFalse);
+    });
+  });
+
+  group('Metadata', () {
+    test('get returns null for a value of another type instead of throwing',
+        () {
+      final metadata = Metadata()..set('genre', ['Rock', 'Pop']);
+
+      expect(metadata.get<String>('genre'), isNull);
+      expect(metadata.get<List<String>>('genre'), ['Rock', 'Pop']);
+      expect(metadata.get<String>('missing'), isNull);
+    });
+  });
+
   group('failures', () {
     test('an invalid key throws and leaves the file untouched', () async {
       final original = Uint8List.fromList([
@@ -432,7 +848,7 @@ void main() {
       final file = writeFile(original);
 
       final handler = ID3Handler(file.path);
-      handler.updateMetadata({'rating': 5});
+      handler.updateMetadata({'bpm': {'not': 'text'}});
 
       await expectLater(
         handler.applyMetadataChanges(),
