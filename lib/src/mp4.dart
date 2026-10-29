@@ -79,8 +79,8 @@ class MP4Handler extends CodecHandler {
       // Build the atom tree of the MP4 file.
       _root = _buildAtomTree();
 
-      // Print the atom tree.
-      printAtomTree(_root);
+      // Log the atom tree (only built if info logging is on).
+      logger.i(() => _formatAtomTree(_root, '').join('\n'));
 
       // Parse the metadata.
       parseMetadata();
@@ -114,16 +114,21 @@ class MP4Handler extends CodecHandler {
   }
 
   List<String> printAtomTree(Atom atom, [String indent = '']) {
-    List<String> output = [];
-    output.add('$indent${atom.toString()}');
-    for (var child in atom.children) {
-      output.addAll(printAtomTree(child, '$indent  '));
-    }
+    final output = _formatAtomTree(atom, indent);
 
     if (indent.isEmpty) {
       logger.i(output.join("\n"));
     }
 
+    return output;
+  }
+
+  List<String> _formatAtomTree(Atom atom, String indent) {
+    List<String> output = [];
+    output.add('$indent${atom.toString()}');
+    for (var child in atom.children) {
+      output.addAll(_formatAtomTree(child, '$indent  '));
+    }
     return output;
   }
 
@@ -150,6 +155,9 @@ class MP4Handler extends CodecHandler {
   void _parseAtomRecursive(Atom parent, int start, int end) {
     int offset = start;
     while (offset < end) {
+      // Not even room for an atom header: the rest is not atoms.
+      if (end - offset < 8) break;
+
       file.setPositionSync(offset);
       int size = _readInt32();
       final type = _readFourCC();
@@ -197,6 +205,17 @@ class MP4Handler extends CodecHandler {
 
       offset += size;
     }
+
+    _keepTrailingBytes(parent, offset, end);
+  }
+
+  /// Keeps the bytes from [offset] to [end] that were not parsed as atoms, so
+  /// that writing the file back does not lose them.
+  void _keepTrailingBytes(Atom parent, int offset, int end) {
+    if (offset >= end) return;
+    logger.d('Keeping ${end - offset} bytes after the atoms of ${parent.type}');
+    file.setPositionSync(offset);
+    parent.trailingData = file.readSync(end - offset);
   }
 
   /// Parses a child atom within the 'ilst' atom.
@@ -216,11 +235,13 @@ class MP4Handler extends CodecHandler {
   void _parseIlstChild(Atom parent, int start, int end) {
     int offset = start;
     while (offset < end) {
+      if (end - offset < 8) break;
+
       file.setPositionSync(offset);
       int size = _readInt32();
       final type = _readFourCC();
 
-      if (size < 8) {
+      if (size < 8 || offset + size > end) {
         logger.d(
           'Invalid ilst child size or overflow: $type, size: $size, offset: $offset',
         );
@@ -238,6 +259,8 @@ class MP4Handler extends CodecHandler {
 
       offset += size;
     }
+
+    _keepTrailingBytes(parent, offset, end);
   }
 
   /// Reads a 32-bit integer from the current position in the file.
@@ -388,6 +411,13 @@ class MP4Handler extends CodecHandler {
         break;
       case 'covr':
         setMetadata(friendlyName, value);
+        setMetadata('covers', [
+          for (final image in atom.children)
+            if (image.type == 'data' &&
+                image.data != null &&
+                image.data!.length >= 8)
+              image.data!.sublist(8),
+        ]);
         break;
 
       default:
@@ -430,8 +460,14 @@ class MP4Handler extends CodecHandler {
 
     setMetadata('creationTime', _decodeInt(take(timeWidth)));
     setMetadata('modificationTime', _decodeInt(take(timeWidth)));
-    setMetadata('timescale', _decodeInt(take(4)));
-    setMetadata('duration', _decodeInt(take(timeWidth)));
+    final timescale = _decodeInt(take(4));
+    final ticks = _decodeInt(take(timeWidth));
+    setMetadata('timescale', timescale);
+    setMetadata('durationTicks', ticks);
+    // In milliseconds, like the duration of an ID3 file.
+    if (timescale > 0) {
+      setMetadata('duration', ticks * 1000 ~/ timescale);
+    }
   }
 
   /// Parses and processes the 'ftyp' atom from an MP4 file.
@@ -521,7 +557,7 @@ class MP4Handler extends CodecHandler {
         return utf8.decode(value);
       case 0: // UTF-16
       case 2: // UTF-16 sort order
-        return String.fromCharCodes(value.buffer.asUint16List());
+        return _decodeUtf16BE(value);
       default:
         return utf8.decode(value); // Default to UTF-8
     }
@@ -537,10 +573,17 @@ class MP4Handler extends CodecHandler {
   ///
   /// Returns:
   /// - A list of two integers representing the decoded values.
+  /// Decodes big-endian UTF-16, which is what MP4 uses.
+  String _decodeUtf16BE(Uint8List value) {
+    return String.fromCharCodes([
+      for (var i = 0; i + 1 < value.length; i += 2) (value[i] << 8) | value[i + 1],
+    ]);
+  }
+
   List<int> _decodeNumericPair(Uint8List value) {
     // 'trkn' is 8 bytes, 'disk' is 6.
     if (value.length >= 6) {
-      final data = value.buffer.asByteData();
+      final data = ByteData.sublistView(value);
       return [data.getUint16(2), data.getUint16(4)];
     }
     return [0, 0];
@@ -597,15 +640,15 @@ class MP4Handler extends CodecHandler {
       case 1: // UTF-8 text
         return utf8.decode(value);
       case 0: // UTF-16 text
-        return String.fromCharCodes(value.buffer.asUint16List());
+        return _decodeUtf16BE(value);
       case 21: // Signed integer
         return _decodeInteger(value, signed: true);
       case 22: // Unsigned integer
         return _decodeInteger(value, signed: false);
       case 23: // Float 32
-        return ByteData.view(value.buffer).getFloat32(0, Endian.big);
+        return ByteData.sublistView(value).getFloat32(0, Endian.big);
       case 24: // Float 64
-        return ByteData.view(value.buffer).getFloat64(0, Endian.big);
+        return ByteData.sublistView(value).getFloat64(0, Endian.big);
       case 27: // Boolean
         return value[0] != 0;
       default:
@@ -631,7 +674,7 @@ class MP4Handler extends CodecHandler {
       return value.fold(0, (number, byte) => (number << 8) | byte);
     }
     if (value.length >= 4) {
-      return value.buffer.asByteData().getUint32(0, Endian.big);
+      return ByteData.sublistView(value).getUint32(0, Endian.big);
     }
     return 0;
   }
@@ -650,7 +693,7 @@ class MP4Handler extends CodecHandler {
   /// - An integer representing the decoded value based on the given data type and signedness.
   ///   If the length of the [value] is less than 4, the function returns 0.
   int _decodeInteger(Uint8List value, {required bool signed}) {
-    final data = ByteData.view(value.buffer);
+    final data = ByteData.sublistView(value);
     switch (value.length) {
       case 1:
         return signed ? data.getInt8(0) : data.getUint8(0);
@@ -689,6 +732,9 @@ class MP4Handler extends CodecHandler {
   /// Returns:
   /// - A boolean indicating whether the new node was successfully added to the atom tree.
   ///   Returns true if the node was added, and false otherwise.
+  ///
+  /// This only changes the tree in memory. Nothing is written until
+  /// [writeToFile] or [applyMetadataChanges].
   bool addNode(List<String> path, Atom newNode) {
     if (path.isEmpty || path[0] != _root.type) {
       logger.d('Path must start with the root node type');
@@ -726,6 +772,9 @@ class MP4Handler extends CodecHandler {
   /// Returns:
   /// - A boolean indicating whether the replacement was successful. Returns true if the node was replaced,
   ///   and false otherwise.
+  ///
+  /// This only changes the tree in memory. Nothing is written until
+  /// [writeToFile] or [applyMetadataChanges].
   bool replaceNode(List<String> path, Atom newNode) {
     if (path.isEmpty || path[0] != _root.type) {
       throw ArgumentError('Path must start with the root node type');
@@ -783,6 +832,9 @@ class MP4Handler extends CodecHandler {
   /// This function traverses the atom tree recursively, updating the offset of each atom
   /// by summing the offsets of its parent and previous siblings. The offset of the root atom
   /// is set to 0.
+  ///
+  /// The offsets are informational: writing works out its own layout and
+  /// reads the media data from [Atom.sourceOffset].
   void updateTreeOffsets() {
     _root.updateOffsets(0);
   }
@@ -839,10 +891,16 @@ class MP4Handler extends CodecHandler {
           );
         }
       }
+      _writeTrailingBytes(_root, output);
     } finally {
       input.closeSync();
       output.closeSync();
     }
+  }
+
+  void _writeTrailingBytes(Atom atom, RandomAccessFile output) {
+    final trailing = atom.trailingData;
+    if (trailing != null) output.writeFromSync(trailing);
   }
 
   void _writeAtom(
@@ -869,6 +927,7 @@ class MP4Handler extends CodecHandler {
       for (final child in atom.children) {
         _writeAtom(child, input, output, moves);
       }
+      _writeTrailingBytes(atom, output);
     } else if (atom.data != null) {
       // 'trak' atoms are kept as raw data, which includes their chunk offsets.
       output.writeFromSync(
@@ -880,6 +939,7 @@ class MP4Handler extends CodecHandler {
       for (final child in atom.children) {
         _writeAtom(child, input, output, moves);
       }
+      _writeTrailingBytes(atom, output);
     }
   }
 
@@ -1019,23 +1079,104 @@ class MP4Handler extends CodecHandler {
   /// Throws an [MP4Exception] if the atom name is not four bytes long or the
   /// value cannot be stored in that atom.
   Atom? encodeMetadataAtom(String key, dynamic value) {
+    if (_isFreeformKey(key)) return _encodeFreeform(key, value);
+
     final atomName = _friendlyToAtomNames[key] ?? key;
     if (atomName.length != 4 || atomName.codeUnits.any((c) => c > 0xFF)) {
       throw MP4Exception('Not a valid atom name: $atomName (from key: $key)');
     }
 
-    final encoded = _encodeMetadataValue(atomName, value);
-    final dataAtom = Atom(
+    // Cover art can hold several images.
+    final values =
+        atomName == 'covr' && value is List && value is! Uint8List
+            ? value
+            : [value];
+    if (values.isEmpty) {
+      throw MP4Exception('$atomName needs at least one value');
+    }
+
+    final newAtom = Atom(atomName, 0, 0);
+    for (final item in values) {
+      newAtom.children.add(_dataAtom(_encodeMetadataValue(atomName, item)));
+    }
+    newAtom.updateSize();
+    return newAtom;
+  }
+
+  /// A `data` atom: version 0 and the data type as flags, a zero locale, then
+  /// the value.
+  Atom _dataAtom(({int type, Uint8List bytes}) encoded) {
+    return Atom(
       'data',
       0,
       8,
-      // Version 0 and the data type as flags, then a zero locale.
-      data: Uint8List.fromList([0, 0, 0, encoded.type, 0, 0, 0, 0, ...encoded.bytes]),
+      data: Uint8List.fromList(
+        [0, 0, 0, encoded.type, 0, 0, 0, 0, ...encoded.bytes],
+      ),
     )..updateSize();
+  }
 
-    final newAtom = Atom(atomName, 0, 0)..children.add(dataAtom);
-    newAtom.updateSize();
-    return newAtom;
+  /// Whether [key] names a freeform (`----`) atom: `mean.name`, for example
+  /// `com.apple.iTunes.MOOD`. This is the key reading produces for them.
+  bool _isFreeformKey(String key) =>
+      key.length != 4 &&
+      key.contains('.') &&
+      !_friendlyToAtomNames.containsKey(key);
+
+  /// The `mean.name` key of a freeform atom, as reading builds it.
+  String? _freeformKey(Atom atom) {
+    if (atom.type != '----' || atom.children.length != 3) return null;
+    final mean = atom.children[0];
+    final name = atom.children[1];
+    if (mean.type != 'mean' || name.type != 'name') return null;
+    final meanData = mean.data;
+    final nameData = name.data;
+    if (meanData == null || nameData == null) return null;
+    if (meanData.length < 4 || nameData.length < 4) return null;
+    try {
+      return '${utf8.decode(meanData.sublist(4))}.'
+          '${utf8.decode(nameData.sublist(4))}';
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// Whether the `ilst` item [atom] is the one [key] refers to.
+  bool _matchesKey(Atom atom, String key) {
+    if (_isFreeformKey(key)) return _freeformKey(atom) == key;
+    return atom.type == (_friendlyToAtomNames[key] ?? key);
+  }
+
+  Atom _encodeFreeform(String key, dynamic value) {
+    final dot = key.lastIndexOf('.');
+    final mean = key.substring(0, dot);
+    final name = key.substring(dot + 1);
+    if (mean.isEmpty || name.isEmpty) {
+      throw MP4Exception('Not a valid freeform key: $key');
+    }
+
+    final ({int type, Uint8List bytes}) encoded;
+    if (value is String) {
+      encoded = (type: 1, bytes: Uint8List.fromList(utf8.encode(value)));
+    } else if (value is int || value is bool) {
+      encoded = _encodeInteger(key, value, 1);
+    } else {
+      throw MP4Exception(
+        'Unsupported metadata value type: ${value.runtimeType} for $key',
+      );
+    }
+
+    Atom text(String type, String string) => Atom(
+          type,
+          0,
+          0,
+          data: Uint8List.fromList([0, 0, 0, 0, ...utf8.encode(string)]),
+        )..updateSize();
+
+    final atom = Atom('----', 0, 0)
+      ..children.addAll([text('mean', mean), text('name', name), _dataAtom(encoded)]);
+    atom.updateSize();
+    return atom;
   }
 
   /// Re-encodes the current value of [key].
@@ -1174,8 +1315,7 @@ class MP4Handler extends CodecHandler {
           _addOrUpdateItem(items, operation.key, operation.value);
           break;
         case OperationType.remove:
-          final atomName = _friendlyToAtomNames[operation.key] ?? operation.key;
-          items.removeWhere((atom) => atom.type == atomName);
+          items.removeWhere((atom) => _matchesKey(atom, operation.key));
           break;
       }
     }
@@ -1207,8 +1347,8 @@ class MP4Handler extends CodecHandler {
       throw MP4Exception('Failed to encode metadata for key: $key');
     }
 
-    final index = items.indexWhere((atom) => atom.type == encodedAtom.type);
-    items.removeWhere((atom) => atom.type == encodedAtom.type);
+    final index = items.indexWhere((atom) => _matchesKey(atom, key));
+    items.removeWhere((atom) => _matchesKey(atom, key));
     // Keep the item where it was so the order of the other items is stable.
     items.insert(index == -1 ? items.length : index, encodedAtom);
   }

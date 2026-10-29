@@ -14,7 +14,10 @@ class Metadata {
   /// [key]: The key for which the value is to be retrieved.
   ///
   /// Returns: The value associated with the given key, or `null` if the key is not found.
-  T? get<T>(String key) => _data[key] as T?;
+  T? get<T>(String key) {
+    final value = _data[key];
+    return value is T ? value : null;
+  }
 
   /// Checks if the metadata contains the given key.
   ///
