@@ -19,6 +19,14 @@ class Atom {
   /// this is never updated, so it can be used to copy the atom's data.
   final int sourceOffset;
 
+  /// The size the atom had in the file it was parsed from.
+  final int sourceSize;
+
+  /// Whether the atom's payload (media data or padding) is not kept in memory
+  /// but copied from the original file, or written as zeros for padding, when
+  /// the file is written.
+  bool streamed = false;
+
   /// The size of the atom's header: 8 bytes, or 16 when it has a 64-bit size.
   int headerSize = 8;
 
@@ -38,7 +46,8 @@ class Atom {
     this.size,
     this.offset, {
     this.data,
-  }) : sourceOffset = offset;
+  })  : sourceOffset = offset,
+        sourceSize = size;
 
   /// Adds a child atom to the current atom.
   void addChild(Atom child) {
@@ -53,8 +62,8 @@ class Atom {
       if (type != 'root') size += headerSize; // Add the header for non-root nodes
       if (type == 'meta') size += 4; // Add 4 for meta nodes
       size += trailing;
-    } else if (type == 'mdat' && data == null) {
-      // For mdat, keep the existing size if data is null
+    } else if ((type == 'mdat' || streamed) && data == null) {
+      // The payload is not in memory, so keep the size it has
     } else if (data != null) {
       size = headerSize + data!.length + trailing; // Header size + data size
     } else {

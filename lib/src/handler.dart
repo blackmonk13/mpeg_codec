@@ -110,7 +110,11 @@ abstract class CodecHandler {
   Future<void> writeToFile(String outputPath);
 
   /// Applies the pending metadata changes to the file.
-  Future<void> applyMetadataChanges();
+  ///
+  /// With [inPlace] the file is edited where it is when the new metadata fits
+  /// in the space the old metadata took; otherwise (or when it does not fit) a
+  /// new file is written and renamed over the original.
+  Future<void> applyMetadataChanges({bool inPlace = true});
 
   /// Adds new metadata entries to the pending operations.
   ///
