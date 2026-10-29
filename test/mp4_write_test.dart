@@ -37,6 +37,13 @@ List<int> item(String name, int dataType, List<int> value) => box(
 List<int> textItem(String name, String text) =>
     item(name, 1, utf8.encode(text));
 
+/// A freeform ('----') item, as iTunes writes for custom tags.
+List<int> freeformItem(String mean, String name, String value) => box('----', [
+      ...box('mean', [0, 0, 0, 0, ...utf8.encode(mean)]),
+      ...box('name', [0, 0, 0, 0, ...utf8.encode(name)]),
+      ...box('data', [0, 0, 0, 1, 0, 0, 0, 0, ...utf8.encode(value)]),
+    ]);
+
 const chunkLength = 1000;
 
 /// Three chunks of recognisable media data.
@@ -48,6 +55,7 @@ List<int> moovBox({
   required List<int> chunkOffsets,
   List<int>? ilstItems,
   bool withUdta = true,
+  List<int> udtaTrailer = const [],
 }) {
   final stco = box('stco', [
     0, 0, 0, 0, // version and flags
@@ -79,6 +87,7 @@ List<int> moovBox({
       ]),
       ...box('ilst', ilstItems ?? []),
     ]),
+    ...udtaTrailer,
   ]);
   return box('moov', [...mvhd, ...trak, if (withUdta) ...udta]);
 }
@@ -97,6 +106,8 @@ Uint8List buildM4a({
   bool withUdta = true,
   bool largeMdat = false,
   List<int> extraBoxes = const [],
+  List<int> udtaTrailer = const [],
+  List<int> fileTrailer = const [],
 }) {
   final ftyp = ftypBox();
   final free = box('free', List.filled(40, 0));
@@ -107,6 +118,7 @@ Uint8List buildM4a({
         chunkOffsets: [for (var i = 0; i < 3; i++) mediaStart + i * chunkLength],
         ilstItems: ilstItems,
         withUdta: withUdta,
+        udtaTrailer: udtaTrailer,
       );
 
   if (moovFirst) {
@@ -122,11 +134,14 @@ Uint8List buildM4a({
       ...extraBoxes,
       ...free,
       ...mdat,
+      ...fileTrailer,
     ]);
   }
 
   final start = ftyp.length + mdatHeader;
-  return Uint8List.fromList([...ftyp, ...mdat, ...moov(start)]);
+  return Uint8List.fromList(
+    [...ftyp, ...mdat, ...moov(start), ...fileTrailer],
+  );
 }
 
 /// The payload range of the box at [path] below [start, end), or null.
@@ -387,6 +402,134 @@ void main() {
           reason: path.join('/'),
         );
       }
+    });
+  });
+
+  group('bytes that are not atoms', () {
+    test('keeps the zero terminator at the end of udta', () async {
+      final file = writeFile(buildM4a(
+        ilstItems: tagged,
+        udtaTrailer: [0, 0, 0, 0],
+      ));
+
+      final handler = MP4Handler(file.path);
+      expect(handler.getMetadata<String>('title'), 'Old title');
+      handler.updateMetadata({'title': 'A much longer title than before!'});
+      await handler.applyMetadataChanges();
+
+      final bytes = file.readAsBytesSync();
+      final udta = findBox(bytes, ['moov', 'udta'])!;
+      expect(bytes.sublist(udta.end - 4, udta.end), [0, 0, 0, 0]);
+      expect(topLevelTypes(bytes), ['ftyp', 'moov', 'free', 'mdat']);
+      expectChunksIntact(bytes);
+      expect(
+        MP4Handler(file.path).getMetadata<String>('title'),
+        'A much longer title than before!',
+      );
+    });
+
+    test('keeps bytes after the last atom', () async {
+      final file = writeFile(buildM4a(
+        ilstItems: tagged,
+        fileTrailer: [1, 2, 3],
+      ));
+
+      final handler = MP4Handler(file.path);
+      handler.updateMetadata({'title': 'A much longer title than before!'});
+      await handler.applyMetadataChanges();
+
+      final bytes = file.readAsBytesSync();
+      expect(bytes.sublist(bytes.length - 3), [1, 2, 3]);
+      expectChunksIntact(bytes);
+    });
+  });
+
+  group('freeform atoms', () {
+    final custom = [
+      ...textItem('©nam', 'Title'),
+      ...freeformItem('com.apple.iTunes', 'MOOD', 'calm'),
+      ...freeformItem('com.apple.iTunes', 'SOURCE', 'vinyl'),
+    ];
+
+    test('are read with a mean.name key', () {
+      final file = writeFile(buildM4a(ilstItems: custom));
+
+      final handler = MP4Handler(file.path);
+      expect(handler.getMetadata<String>('com.apple.iTunes.MOOD'), 'calm');
+      expect(handler.getMetadata<String>('com.apple.iTunes.SOURCE'), 'vinyl');
+    });
+
+    test('are replaced one at a time', () async {
+      final file = writeFile(buildM4a(ilstItems: custom));
+
+      final handler = MP4Handler(file.path);
+      handler.updateMetadata({'com.apple.iTunes.MOOD': 'lively'});
+      await handler.applyMetadataChanges();
+
+      final reread = MP4Handler(file.path);
+      expect(reread.getMetadata<String>('com.apple.iTunes.MOOD'), 'lively');
+      expect(reread.getMetadata<String>('com.apple.iTunes.SOURCE'), 'vinyl');
+      expect(reread.getMetadata<String>('title'), 'Title');
+      expectChunksIntact(file.readAsBytesSync());
+    });
+
+    test('can be added and removed', () async {
+      final file = writeFile(buildM4a(ilstItems: custom));
+
+      final handler = MP4Handler(file.path);
+      handler.addMetadata({'com.apple.iTunes.TEMPO': 'slow', 'com.example.n': 7});
+      handler.removeMetadata(['com.apple.iTunes.SOURCE']);
+      await handler.applyMetadataChanges();
+
+      final reread = MP4Handler(file.path);
+      expect(reread.getMetadata<String>('com.apple.iTunes.TEMPO'), 'slow');
+      expect(reread.getMetadata<int>('com.example.n'), 7);
+      expect(reread.metadata.contains('com.apple.iTunes.SOURCE'), isFalse);
+      expect(reread.getMetadata<String>('com.apple.iTunes.MOOD'), 'calm');
+    });
+  });
+
+  group('cover art', () {
+    test('several covers are written and read', () async {
+      final file = writeFile(buildM4a(ilstItems: tagged));
+      final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, 5, 6, 7, 8]);
+      final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4]);
+
+      final handler = MP4Handler(file.path);
+      handler.updateMetadata({'cover': [jpeg, png]});
+      await handler.applyMetadataChanges();
+
+      final reread = MP4Handler(file.path);
+      expect(reread.getMetadata<Uint8List>('cover'), jpeg);
+      expect(reread.getMetadata<List>('covers'), [jpeg, png]);
+
+      final bytes = file.readAsBytesSync();
+      final covr = findBox(bytes, ['moov', 'udta', 'meta', 'ilst', 'covr'])!;
+      expect(bytes[covr.start + 8 + 3], 13);
+      expectChunksIntact(bytes);
+    });
+
+    test('an empty list of covers throws', () async {
+      final file = writeFile(buildM4a(ilstItems: tagged));
+
+      final handler = MP4Handler(file.path);
+      handler.updateMetadata({'cover': <Uint8List>[]});
+
+      await expectLater(
+        handler.applyMetadataChanges(),
+        throwsA(isA<MP4Exception>()),
+      );
+    });
+  });
+
+  group('reading', () {
+    test('decodes big-endian UTF-16 text', () {
+      // 'Hé日' in UTF-16BE, data type 2.
+      final file = writeFile(buildM4a(
+        ilstItems: item('©nam', 2, [0x00, 0x48, 0x00, 0xE9, 0x65, 0xE5]),
+      ));
+
+      expect(MP4Handler(file.path).getMetadata<String>('title'), 'Hé日');
     });
   });
 
