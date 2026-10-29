@@ -22,6 +22,10 @@ class Atom {
   /// The size of the atom's header: 8 bytes, or 16 when it has a 64-bit size.
   int headerSize = 8;
 
+  /// Bytes at the end of a container that are not atoms (for example the
+  /// zero terminator of a 'udta' atom). They are written back unchanged.
+  Uint8List? trailingData;
+
   /// The optional data associated with the atom.
   Uint8List? data;
 
@@ -43,16 +47,19 @@ class Atom {
 
   /// Updates the size of the current atom and its children.
   void updateSize() {
+    final trailing = trailingData?.length ?? 0;
     if (children.isNotEmpty) {
       size = children.fold(0, (sum, child) => sum + child.size);
       if (type != 'root') size += headerSize; // Add the header for non-root nodes
       if (type == 'meta') size += 4; // Add 4 for meta nodes
+      size += trailing;
     } else if (type == 'mdat' && data == null) {
       // For mdat, keep the existing size if data is null
     } else if (data != null) {
-      size = headerSize + data!.length; // Header size + data size
+      size = headerSize + data!.length + trailing; // Header size + data size
     } else {
-      size = headerSize; // Just the header size for empty atoms
+      // Just the header size (and the flags of a 'meta' atom) for empty atoms
+      size = headerSize + (type == 'meta' ? 4 : 0) + trailing;
     }
   }
 

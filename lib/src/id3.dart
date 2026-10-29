@@ -8,7 +8,6 @@ import 'package:archive/archive.dart';
 import 'exceptions.dart';
 import 'genres.dart';
 import 'id3_tags.dart';
-import 'utils.dart';
 import 'handler.dart';
 
 final Map<String, String> _friendlyToFrameIds = {
@@ -63,6 +62,9 @@ class ID3Handler extends CodecHandler {
   /// Offset of the first byte after the ID3v2 tag (0 if there is none).
   int _audioStart = 0;
 
+  /// Every APIC frame of the tag, in order. `picture` is the last one.
+  List<Map<String, dynamic>> _pictures = [];
+
   /// A map of custom frame handlers for handling unknown or unsupported frames.
   final Map<String, Function> _customFrameHandlers = {};
 
@@ -94,6 +96,7 @@ class ID3Handler extends CodecHandler {
   void parseMetadata() {
     openRead();
     metadata.clear();
+    _pictures = [];
     try {
       _id3v2Tag = _parseID3v2();
       _parseID3v1();
@@ -158,7 +161,7 @@ class ID3Handler extends CodecHandler {
           _parseID3v2Frames(tagData.sublist(dataOffset), version);
 
       if (footerPresent) {
-        _parseID3v2Footer(tagData.sublist(tagData.length - 10));
+        _parseID3v2Footer(file.readSync(10));
       }
 
       _audioStart = 10 + size + (footerPresent ? 10 : 0);
@@ -352,6 +355,9 @@ class ID3Handler extends CodecHandler {
       case 'APIC':
         _parseAPICFrame(data);
         break;
+      case 'POPM':
+        _parsePopularimeterFrame(data);
+        break;
       case 'USLT':
         _parseUnsynchronizedLyricsFrame(data);
         break;
@@ -543,6 +549,14 @@ class ID3Handler extends CodecHandler {
       case 'TCON':
         _parseGenreFrame(textValues);
         break;
+      case 'TDRC':
+        setMetadata(key, textValues.length > 1 ? textValues : textValues[0]);
+        // ID3v2.4 keeps the year in the recording time, 'TYER' is gone.
+        final year = RegExp(r'^\d{4}').firstMatch(textValues[0])?.group(0);
+        if (year != null && !metadata.contains('year')) {
+          setMetadata('year', year);
+        }
+        break;
       default:
         if (textValues.length > 1) {
           setMetadata(key, textValues);
@@ -679,7 +693,7 @@ class ID3Handler extends CodecHandler {
   /// A [String] representing the decoded UTF-16 data.
   String _decodeUTF16(Uint8List data) {
     if (data.length < 2) return '';
-    ByteData byteData = ByteData.view(data.buffer);
+    ByteData byteData = ByteData.sublistView(data);
 
     bool isLittleEndian = (data[0] == 0xFF && data[1] == 0xFE);
     int offset = (data[0] == 0xFF || data[0] == 0xFE) ? 2 : 0;
@@ -742,12 +756,15 @@ class ID3Handler extends CodecHandler {
         descriptionEnd + (encoding == 1 || encoding == 2 ? 2 : 1);
     Uint8List pictureData = data.sublist(imageDataStart);
 
-    setMetadata('picture', {
+    final picture = {
       'mimeType': mimeType,
       'pictureType': pictureType,
       'description': description,
       'data': pictureData,
-    });
+    };
+    _pictures.add(picture);
+    setMetadata('picture', picture);
+    setMetadata('pictures', _pictures);
   }
 
   /// Parses the Unsynchronized Lyrics (USLT) frame data and sets the corresponding metadata.
@@ -757,6 +774,14 @@ class ID3Handler extends CodecHandler {
   ///
   /// Parameters:
   /// - [data]: A [Uint8List] containing the USLT frame data.
+  /// Parses a POPM frame: the owner's e-mail, the rating (0-255) and a play
+  /// counter. The rating is stored as `rating`.
+  void _parsePopularimeterFrame(Uint8List data) {
+    final ownerEnd = data.indexOf(0);
+    if (ownerEnd == -1 || ownerEnd + 1 >= data.length) return;
+    setMetadata('rating', data[ownerEnd + 1]);
+  }
+
   void _parseUnsynchronizedLyricsFrame(Uint8List data) {
     int encoding = data[0];
     String language = String.fromCharCodes(data.sublist(1, 4));
@@ -774,6 +799,8 @@ class ID3Handler extends CodecHandler {
   }
 
   int _getBitrate(int version, int layer, int bitrateIndex) {
+    // The rows are MPEG-1 layers I, II and III, then MPEG-2 and 2.5 layer I,
+    // then MPEG-2 and 2.5 layers II and III.
     final bitrates = [
       [32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
       [32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
@@ -782,69 +809,162 @@ class ID3Handler extends CodecHandler {
       [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
     ];
 
-    int versionIndex = version == 3 ? 0 : 1;
-    int layerIndex = 3 - layer;
-    int bitRateArrayIndex = versionIndex * 3 + layerIndex;
+    // Version 1 and layer 0 are reserved. The layer bits are 3 for layer I, 2
+    // for layer II and 1 for layer III.
+    if (version == 1 || layer == 0 || bitrateIndex < 1 || bitrateIndex > 14) {
+      return 0;
+    }
 
-    return bitrateIndex > 0 && bitrateIndex <= 14
-        ? bitrates[bitRateArrayIndex][bitrateIndex - 1]
-        : 0;
+    final row = version == 3 ? 3 - layer : (layer == 3 ? 3 : 4);
+    return bitrates[row][bitrateIndex - 1];
   }
 
   Duration? _calculateDuration() {
     try {
-      file.setPositionSync(0);
-      int fileSize = file.lengthSync();
+      final fileSize = file.lengthSync();
       setMetadata('size', fileSize); // Add file size to metadata
 
-      // Try to parse VBR headers first
-      Duration? vbrDuration = _parseVBRHeader();
-      if (vbrDuration != null) {
-        _setDurationMetadata(vbrDuration);
-        return vbrDuration;
-      }
+      // Find the first MPEG frame after the ID3v2 tag. There can be padding
+      // between the two, so look through the first 64 KiB.
+      final start = math.min(_audioStart, fileSize);
+      file.setPositionSync(start);
+      final data = file.readSync(math.min(64 * 1024, fileSize - start));
 
-      // If VBR header not found, use sampling method
-      // ignore: unused_local_variable
-      int totalFrames = 0;
-      int totalBitrate = 0;
-      int samplesCount = 0;
-      int sampleInterval = math.max(fileSize ~/ 1000,
-          1000); // Sample every ~1000 bytes or every 1KB, whichever is larger
+      for (var i = 0; i + 4 <= data.length; i++) {
+        final frame = _readFrameHeader(data, i);
+        if (frame == null) continue;
 
-      for (int position = 0;
-          position < fileSize - 10;
-          position += sampleInterval) {
-        file.setPositionSync(position);
-        Uint8List header = file.readSync(4);
-
-        // Look for MP3 frame sync
-        if (header[0] == 0xFF && (header[1] & 0xE0) == 0xE0) {
-          int version = (header[1] & 0x18) >> 3;
-          int layer = (header[1] & 0x06) >> 1;
-          int bitrate = _getBitrate(version, layer, header[2] >> 4);
-          int sampleRate = _getSampleRate(version, (header[2] & 0x0C) >> 2);
-
-          if (bitrate > 0 && sampleRate > 0) {
-            totalFrames++;
-            totalBitrate += bitrate;
-            samplesCount++;
+        // A real frame is followed by another one.
+        final next = i + frame.length;
+        if (next + 4 <= data.length) {
+          final following = _readFrameHeader(data, next);
+          if (following == null ||
+              following.sampleRate != frame.sampleRate ||
+              following.layer != frame.layer) {
+            continue;
           }
         }
-      }
 
-      if (samplesCount > 0) {
-        double avgBitrate = totalBitrate / samplesCount;
-        double durationSeconds = (fileSize * 8) / (avgBitrate * 1000);
-        Duration calculatedDuration =
-            Duration(milliseconds: (durationSeconds * 1000).round());
-        _setDurationMetadata(calculatedDuration);
-        return calculatedDuration;
+        final duration = _durationFromFrame(data, i, frame, start + i, fileSize);
+        if (duration != null) {
+          _setDurationMetadata(duration);
+          return duration;
+        }
+        break;
       }
     } catch (e) {
       logger.e('Error calculating duration: $e');
     }
     return null;
+  }
+
+  /// The duration from the Xing, Info or VBRI header in the first frame, or,
+  /// for a constant bitrate file, from its size.
+  Duration? _durationFromFrame(
+    Uint8List data,
+    int offset,
+    ({
+      int version,
+      int layer,
+      int bitrate,
+      int sampleRate,
+      bool mono,
+      bool crc,
+      int length,
+      int samplesPerFrame,
+    }) frame,
+    int frameStart,
+    int fileSize,
+  ) {
+    final view = ByteData.sublistView(data);
+
+    // The Xing/Info header sits after the side information of the first frame.
+    final sideInfo = frame.version == 3
+        ? (frame.mono ? 17 : 32)
+        : (frame.mono ? 9 : 17);
+    final xing = offset + 4 + (frame.crc ? 2 : 0) + sideInfo;
+    if (frame.layer == 1 && xing + 12 <= data.length) {
+      final id = String.fromCharCodes(data.sublist(xing, xing + 4));
+      if ((id == 'Xing' || id == 'Info') && view.getUint32(xing + 4) & 0x1 != 0) {
+        final frames = view.getUint32(xing + 8);
+        if (frames > 0) {
+          return Duration(
+            milliseconds:
+                (frames * frame.samplesPerFrame * 1000 / frame.sampleRate)
+                    .round(),
+          );
+        }
+      }
+    }
+
+    // The VBRI header is always 32 bytes after the frame header.
+    final vbri = offset + 4 + 32;
+    if (frame.layer == 1 && vbri + 18 <= data.length) {
+      if (String.fromCharCodes(data.sublist(vbri, vbri + 4)) == 'VBRI') {
+        final frames = view.getUint32(vbri + 14);
+        if (frames > 0) {
+          return Duration(
+            milliseconds:
+                (frames * frame.samplesPerFrame * 1000 / frame.sampleRate)
+                    .round(),
+          );
+        }
+      }
+    }
+
+    // Constant bitrate: the audio bytes divided by the bitrate. An ID3v1 tag
+    // at the end of the file is not audio.
+    var audioEnd = fileSize;
+    if (fileSize - 128 > frameStart) {
+      file.setPositionSync(fileSize - 128);
+      if (String.fromCharCodes(file.readSync(3)) == 'TAG') audioEnd -= 128;
+    }
+    // bitrate is in kilobits per second, which is bits per millisecond.
+    return Duration(
+      milliseconds: ((audioEnd - frameStart) * 8 / frame.bitrate).round(),
+    );
+  }
+
+  /// Reads the MPEG audio frame header at [i], or returns `null` if the bytes
+  /// there are not a valid one.
+  ({
+    int version,
+    int layer,
+    int bitrate,
+    int sampleRate,
+    bool mono,
+    bool crc,
+    int length,
+    int samplesPerFrame,
+  })? _readFrameHeader(Uint8List data, int i) {
+    if (i + 4 > data.length) return null;
+    if (data[i] != 0xFF || (data[i + 1] & 0xE0) != 0xE0) return null;
+
+    final version = (data[i + 1] >> 3) & 0x3;
+    final layer = (data[i + 1] >> 1) & 0x3;
+    final bitrate = _getBitrate(version, layer, data[i + 2] >> 4);
+    final sampleRate = _getSampleRate(version, (data[i + 2] >> 2) & 0x3);
+    if (version == 1 || layer == 0 || bitrate == 0 || sampleRate == 0) {
+      return null;
+    }
+
+    final padding = (data[i + 2] >> 1) & 0x1;
+    final samplesPerFrame =
+        layer == 3 ? 384 : (layer == 2 || version == 3 ? 1152 : 576);
+    final length = layer == 3
+        ? (12000 * bitrate ~/ sampleRate + padding) * 4
+        : (samplesPerFrame ~/ 8) * 1000 * bitrate ~/ sampleRate + padding;
+
+    return (
+      version: version,
+      layer: layer,
+      bitrate: bitrate,
+      sampleRate: sampleRate,
+      mono: (data[i + 3] >> 6) == 3,
+      crc: (data[i + 1] & 0x1) == 0,
+      length: length,
+      samplesPerFrame: samplesPerFrame,
+    );
   }
 
   int _getSampleRate(int version, int sampleRateIndex) {
@@ -856,78 +976,6 @@ class ID3Handler extends CodecHandler {
 
     int versionIndex = version == 3 ? 0 : (version == 2 ? 1 : 2);
     return sampleRateIndex < 3 ? sampleRates[versionIndex][sampleRateIndex] : 0;
-  }
-
-  Duration? _parseVBRHeader() {
-    try {
-      file.setPositionSync(0);
-      Uint8List initialData = file.readSync(10);
-
-      // Skip ID3v2 tag if present
-      if (initialData
-          .sublist(0, 3)
-          .equals(Uint8List.fromList([0x49, 0x44, 0x33]))) {
-        int tagSize = _syncSafeInteger(initialData.sublist(6, 10)) + 10;
-        file.setPositionSync(tagSize);
-        initialData = file.readSync(10);
-      }
-
-      // Find first MP3 frame
-      int frameStart = 0;
-      while (frameStart < initialData.length - 1) {
-        if (initialData[frameStart] == 0xFF &&
-            (initialData[frameStart + 1] & 0xE0) == 0xE0) {
-          break;
-        }
-        frameStart++;
-      }
-
-      if (frameStart >= initialData.length - 1) {
-        return null; // No MP3 frame found
-      }
-
-      file.setPositionSync(file.positionSync() - (10 - frameStart));
-      Uint8List frameHeader = file.readSync(4);
-      int version = (frameHeader[1] & 0x18) >> 3;
-      // int layer = (frameHeader[1] & 0x06) >> 1;
-      int sampleRate = _getSampleRate(version, (frameHeader[2] & 0x0C) >> 2);
-
-      // Check for Xing/Info header
-      file.setPositionSync(file.positionSync() + (version == 3 ? 32 : 17));
-      Uint8List xingHeader = file.readSync(12);
-      if (xingHeader
-              .sublist(0, 4)
-              .equals(Uint8List.fromList([0x58, 0x69, 0x6E, 0x67])) || // "Xing"
-          xingHeader
-              .sublist(0, 4)
-              .equals(Uint8List.fromList([0x49, 0x6E, 0x66, 0x6F]))) {
-        // "Info"
-        int flags = ByteData.view(xingHeader.buffer).getUint32(4);
-        int framesOffset = 8;
-        if ((flags & 0x1) != 0) {
-          // Frames field is present
-          int totalFrames =
-              ByteData.view(xingHeader.buffer).getUint32(framesOffset);
-          double durationSeconds = totalFrames * 1152 / sampleRate;
-          return Duration(milliseconds: (durationSeconds * 1000).round());
-        }
-      }
-
-      // Check for VBRI header
-      file.setPositionSync(file.positionSync() - 12 + 32);
-      Uint8List vbriHeader = file.readSync(26);
-      if (vbriHeader
-          .sublist(0, 4)
-          .equals(Uint8List.fromList([0x56, 0x42, 0x52, 0x49]))) {
-        // "VBRI"
-        int totalFrames = ByteData.view(vbriHeader.buffer).getUint32(14);
-        double durationSeconds = totalFrames * 1152 / sampleRate;
-        return Duration(milliseconds: (durationSeconds * 1000).round());
-      }
-    } catch (e) {
-      logger.e('Error parsing VBR header: $e');
-    }
-    return null;
   }
 
   void _setDurationMetadata(Duration duration) {
@@ -980,7 +1028,9 @@ class ID3Handler extends CodecHandler {
         if (data[i] == 0 && data[i + 1] == 0) return i;
       }
     } else {
-      return data.indexOf(0, start);
+      // The last string of a frame does not have to be terminated.
+      final end = data.indexOf(0, start);
+      return end == -1 ? data.length : end;
     }
     return data.length;
   }
@@ -1064,6 +1114,7 @@ class ID3Handler extends CodecHandler {
   /// The function reads the last 128 bytes of the file and checks if they contain an ID3v1 tag.
   /// If an ID3v1 tag is found, the function extracts and stores the metadata (title, artist, album, year, track, comment, and genre) from the tag.
   void _parseID3v1() {
+    if (file.lengthSync() < 128) return;
     file.setPositionSync(file.lengthSync() - 128);
     Uint8List tagData = file.readSync(128);
 
@@ -1071,38 +1122,31 @@ class ID3Handler extends CodecHandler {
     if (String.fromCharCodes(tagData.sublist(0, 3)) == 'TAG') {
       logger.i('Found ID3v1 tag');
 
-      // Extract and store the title metadata
-      setMetadata('title',
-          _trimNullTerminator(_decodeString(tagData.sublist(3, 33), 0)));
+      // ID3v2 is more complete (ID3v1 cuts text off at 30 characters), so
+      // ID3v1 only fills in what the ID3v2 tag did not have.
+      void fill(String key, dynamic value) {
+        if (value == null || (value is String && value.isEmpty)) return;
+        if (!metadata.contains(key)) setMetadata(key, value);
+      }
 
-      // Extract and store the artist metadata
-      setMetadata('artist',
-          _trimNullTerminator(_decodeString(tagData.sublist(33, 63), 0)));
+      String text(int start, int end) =>
+          _trimNullTerminator(_decodeString(tagData.sublist(start, end), 0));
 
-      // Extract and store the album metadata
-      setMetadata('album',
-          _trimNullTerminator(_decodeString(tagData.sublist(63, 93), 0)));
-
-      // Extract and store the year metadata
-      setMetadata('year',
-          _trimNullTerminator(_decodeString(tagData.sublist(93, 97), 0)));
+      fill('title', text(3, 33));
+      fill('artist', text(33, 63));
+      fill('album', text(63, 93));
+      fill('year', text(93, 97));
 
       // Check for ID3v1.1 (looking for a zero byte at position 125)
       if (tagData[125] == 0) {
-        // Extract and store the track metadata
-        setMetadata('track', tagData[126]);
-
-        // Extract and store the comment metadata
-        setMetadata('comment',
-            _trimNullTerminator(_decodeString(tagData.sublist(97, 125), 0)));
+        fill('track', tagData[126] == 0 ? null : tagData[126]);
+        fill('comment', text(97, 125));
       } else {
-        // Extract and store the comment metadata
-        setMetadata('comment',
-            _trimNullTerminator(_decodeString(tagData.sublist(97, 127), 0)));
+        fill('comment', text(97, 127));
       }
 
-      // Extract and store the genre metadata
-      setMetadata('genre', getGenreById(tagData[127]));
+      // 255 means that there is no genre.
+      fill('genre', tagData[127] == 255 ? null : getGenreById(tagData[127]));
     }
   }
 
@@ -1258,10 +1302,16 @@ class ID3Handler extends CodecHandler {
   /// it is 2.3, otherwise 2.4.
   int get _writeVersion => _id3v2Tag.version == 3 ? 3 : 4;
 
+  /// Writes the file with [frames] as its ID3v2 tag.
+  ///
+  /// If the file has an ID3v1 tag, the fields named in [changes] (a map of
+  /// friendly key to new value, `null` for a removed key) are updated in it so
+  /// that it does not contradict the new ID3v2 tag. Its other fields are kept.
   Future<void> _writeWithFrames(
     String outputPath,
-    List<ID3v2Frame> frames,
-  ) async {
+    List<ID3v2Frame> frames, {
+    Map<String, dynamic> changes = const {},
+  }) async {
     final version = _writeVersion;
     final tag = BytesBuilder(copy: false);
 
@@ -1298,11 +1348,39 @@ class ID3Handler extends CodecHandler {
       output.writeFromSync(tagHeader);
       output.writeFromSync(tagBytes);
 
-      input.setPositionSync(math.min(_audioStart, input.lengthSync()));
+      final length = input.lengthSync();
+      final start = math.min(_audioStart, length);
+
+      // An ID3v1 tag is the last 128 bytes of the file.
+      var audioEnd = length;
+      Uint8List? id3v1;
+      if (length - 128 >= start) {
+        input.setPositionSync(length - 128);
+        final tail = input.readSync(128);
+        if (tail[0] == 0x54 && tail[1] == 0x41 && tail[2] == 0x47) {
+          id3v1 = tail;
+          audioEnd = length - 128;
+        }
+      }
+
+      input.setPositionSync(start);
       final buffer = Uint8List(1024 * 1024);
-      int bytesRead;
-      while ((bytesRead = input.readIntoSync(buffer)) > 0) {
+      var remaining = audioEnd - start;
+      while (remaining > 0) {
+        final bytesRead = input.readIntoSync(
+          buffer,
+          0,
+          math.min(remaining, buffer.length),
+        );
+        if (bytesRead == 0) {
+          throw ID3Exception('Unexpected end of file while copying audio');
+        }
         output.writeFromSync(buffer, 0, bytesRead);
+        remaining -= bytesRead;
+      }
+
+      if (id3v1 != null) {
+        output.writeFromSync(_patchedId3v1(id3v1, changes));
       }
     } finally {
       input.closeSync();
@@ -1312,58 +1390,164 @@ class ID3Handler extends CodecHandler {
     logger.d('File written successfully to: $outputPath');
   }
 
-  /// Returns the ID3v2 frame ID for the friendly [key], or [key] itself when
-  /// it is already a frame ID.
+  /// Returns a copy of the ID3v1 tag [original] with the fields named in
+  /// [changes] replaced.
+  Uint8List _patchedId3v1(Uint8List original, Map<String, dynamic> changes) {
+    final tag = Uint8List.fromList(original);
+
+    void setField(String key, int offset, int length) {
+      if (!changes.containsKey(key)) return;
+      // ID3v1 is ISO-8859-1, so anything outside it becomes '?'.
+      final text = _id3v1Text(changes[key]).replaceAll(
+        RegExp(r'[^\u0000-ÿ]'),
+        '?',
+      );
+      final bytes = latin1.encode(text);
+      tag.fillRange(offset, offset + length, 0);
+      tag.setRange(offset, offset + math.min(length, bytes.length), bytes);
+    }
+
+    // ID3v1.1 keeps the track number in the last byte of the comment.
+    final hasTrack = changes.containsKey('track')
+        ? _id3v1Track(changes['track']) != null
+        : tag[125] == 0 && tag[126] != 0;
+
+    setField('title', 3, 30);
+    setField('artist', 33, 30);
+    setField('album', 63, 30);
+    setField('year', 93, 4);
+    setField('comment', 97, hasTrack ? 28 : 30);
+
+    if (changes.containsKey('track')) {
+      final track = _id3v1Track(changes['track']);
+      tag[125] = 0;
+      tag[126] = track ?? 0;
+    }
+
+    if (changes.containsKey('genre')) {
+      final name = _id3v1Text(changes['genre']).toLowerCase();
+      final index = genres.indexWhere((genre) => genre.toLowerCase() == name);
+      tag[127] = index >= 0 && index < 255 ? index : 255;
+    }
+
+    return tag;
+  }
+
+  String _id3v1Text(dynamic value) {
+    if (value == null) return '';
+    if (value is Map) return value['text']?.toString() ?? '';
+    return _textFromValue(value, 4) ?? value.toString();
+  }
+
+  int? _id3v1Track(dynamic value) {
+    final first = value is List
+        ? (value.isEmpty ? null : value.first)
+        : value is String
+            ? int.tryParse(value.split('/').first.trim())
+            : value;
+    return first is int && first > 0 && first <= 255 ? first : null;
+  }
+
+  /// The frame ID and, for frames that can occur several times, the part of
+  /// the key after the colon (`TXXX:Mood` is the TXXX frame described as
+  /// "Mood"), for the friendly [key].
   ///
   /// `TYER` was dropped in ID3v2.4, where the year lives in `TDRC`.
-  String _frameIdFor(String key, int version) {
-    if (key == 'year' && version == 4) return 'TDRC';
-    return _friendlyToFrameIds[key] ?? key;
+  ({String id, String? qualifier}) _frameTarget(String key, int version) {
+    if (key.length > 5 && key[4] == ':') {
+      return (id: key.substring(0, 4), qualifier: key.substring(5));
+    }
+    if (key == 'userDefinedText') return (id: 'TXXX', qualifier: null);
+    if (key == 'year' && version == 4) return (id: 'TDRC', qualifier: null);
+    return (id: _friendlyToFrameIds[key] ?? key, qualifier: null);
+  }
+
+  /// What tells frames with the same ID apart: the description of a TXXX
+  /// frame and the owner of a POPM frame. `null` for other frames.
+  String? _frameIdentity(ID3v2Frame frame) {
+    final data = frame.data;
+    try {
+      if (frame.id == 'TXXX' && data.length > 1) {
+        final description = _splitNullTerminated(data.sublist(1), data[0]);
+        return description.isEmpty ? '' : _decodeString(description[0], data[0]);
+      }
+      if (frame.id == 'POPM') {
+        final end = data.indexOf(0);
+        return latin1.decode(data.sublist(0, end == -1 ? data.length : end));
+      }
+    } catch (e) {
+      logger.w('Could not read the identity of ${frame.id}: $e');
+    }
+    return null;
   }
 
   /// Encodes the given metadata [value] into an ID3v2 frame with the specified [key].
   ///
   /// Returns `null` (and logs a warning) if the key is not a valid frame ID
-  /// or the value cannot be encoded for that frame.
-  ID3v2Frame? encodeMetadataFrame(String key, dynamic value) {
-    final version = _writeVersion;
-    final frameId = _frameIdFor(key, version);
+  /// or the value cannot be encoded for that frame. If the value needs
+  /// several frames (a list of pictures), only the first is returned.
+  ID3v2Frame? encodeMetadataFrame(String key, dynamic value) =>
+      _encodeFrames(key, value)?.first;
 
-    if (!RegExp(r'^[A-Z0-9]{4}$').hasMatch(frameId)) {
-      logger.w('Not a valid ID3v2 frame ID: $frameId (from key: $key)');
+  List<ID3v2Frame>? _encodeFrames(String key, dynamic value) {
+    final version = _writeVersion;
+    final target = _frameTarget(key, version);
+
+    if (!RegExp(r'^[A-Z0-9]{4}$').hasMatch(target.id)) {
+      logger.w('Not a valid ID3v2 frame ID: ${target.id} (from key: $key)');
       return null;
     }
 
-    final encodedValue = _encodeMetadataValue(key, frameId, value, version);
-    if (encodedValue == null) {
+    final bodies = _encodeBodies(target, value, version);
+    if (bodies == null || bodies.isEmpty) {
       logger.w('Failed to encode metadata for key: $key');
       return null;
     }
 
-    return ID3v2Frame(frameId, encodedValue.length, encodedValue);
+    return [
+      for (final body in bodies) ID3v2Frame(target.id, body.length, body),
+    ];
   }
 
-  /// Encodes [text] for a frame of the given ID3v2 [version].
+  /// Encodes [strings] in one text encoding suitable for [version].
   ///
   /// ID3v2.4 uses UTF-8. ID3v2.3 has no UTF-8, so the text is ISO-8859-1 when
-  /// it fits and UTF-16 with a byte order mark otherwise.
-  ({int encoding, Uint8List bytes}) _encodeText(String text, int version) {
+  /// it fits and UTF-16 with a byte order mark otherwise. With [preferLatin1]
+  /// ISO-8859-1 is used whenever it fits, in either version.
+  ({int encoding, List<Uint8List> parts}) _encodeStrings(
+    List<String> strings,
+    int version, {
+    bool preferLatin1 = false,
+  }) {
+    final fitsLatin1 =
+        strings.every((s) => s.codeUnits.every((c) => c <= 0xFF));
+
+    if (fitsLatin1 && (version == 3 || preferLatin1)) {
+      return (
+        encoding: 0,
+        parts: [for (final s in strings) Uint8List.fromList(latin1.encode(s))],
+      );
+    }
     if (version == 4) {
-      return (encoding: 3, bytes: Uint8List.fromList(utf8.encode(text)));
+      return (
+        encoding: 3,
+        parts: [for (final s in strings) Uint8List.fromList(utf8.encode(s))],
+      );
     }
-    if (text.codeUnits.every((c) => c <= 0xFF)) {
-      return (encoding: 0, bytes: Uint8List.fromList(latin1.encode(text)));
-    }
-    final bytes = BytesBuilder()..add([0xFF, 0xFE]);
-    for (final unit in text.codeUnits) {
-      bytes.add([unit & 0xFF, unit >> 8]);
-    }
-    return (encoding: 1, bytes: bytes.takeBytes());
+    return (
+      encoding: 1,
+      parts: [
+        for (final s in strings)
+          Uint8List.fromList([
+            0xFF, 0xFE, // byte order mark: little-endian
+            for (final unit in s.codeUnits) ...[unit & 0xFF, unit >> 8],
+          ]),
+      ],
+    );
   }
 
-  /// An empty string followed by its terminator, in the given text [encoding].
-  List<int> _emptyTerminatedString(int encoding) =>
-      encoding == 1 ? [0xFF, 0xFE, 0x00, 0x00] : [0x00];
+  /// The terminator of a string in the given text [encoding].
+  List<int> _terminator(int encoding) => encoding == 1 ? [0, 0] : [0];
 
   /// Turns [value] into the text stored in a text frame, or `null` if the
   /// value has no text form.
@@ -1381,57 +1565,132 @@ class ID3Handler extends CodecHandler {
     return null;
   }
 
-  /// Encodes [value] as the body of the frame [frameId].
-  Uint8List? _encodeMetadataValue(
-    String key,
-    String frameId,
+  /// Encodes [value] as the body (or bodies) of the frame [target].
+  List<Uint8List>? _encodeBodies(
+    ({String id, String? qualifier}) target,
     dynamic value,
     int version,
   ) {
-    if (value is Uint8List && key == 'picture') {
-      return _encodePictureFrame(value);
+    final id = target.id;
+
+    if (id == 'APIC') {
+      final pictures = value is Uint8List || value is Map
+          ? [value]
+          : value is List
+              ? value
+              : null;
+      if (pictures == null) return null;
+      final bodies = [for (final p in pictures) _encodePictureFrame(p)];
+      return bodies.contains(null) ? null : bodies.cast<Uint8List>();
     }
 
     if (value is Uint8List) {
       // Raw frame body for frames without a dedicated encoder.
-      return value;
+      return [value];
     }
 
-    if (frameId == 'COMM' || frameId == 'USLT') {
-      if (value is! String) return null;
-      final text = _encodeText(value, version);
-      return Uint8List.fromList([
-        text.encoding,
-        ...ascii.encode('eng'),
-        ..._emptyTerminatedString(text.encoding), // empty description
-        ...text.bytes,
-      ]);
+    if (id == 'COMM' || id == 'USLT') {
+      final fields = value is Map
+          ? value
+          : value is String
+              ? {'text': value}
+              : null;
+      if (fields == null) return null;
+      final language = (fields['language'] ?? 'eng').toString();
+      if (language.length != 3 || language.codeUnits.any((c) => c > 0x7F)) {
+        return null;
+      }
+      final strings = _encodeStrings([
+        (fields['description'] ?? '').toString(),
+        (fields['text'] ?? '').toString(),
+      ], version);
+      return [
+        Uint8List.fromList([
+          strings.encoding,
+          ...ascii.encode(language),
+          ...strings.parts[0],
+          ..._terminator(strings.encoding),
+          ...strings.parts[1],
+        ]),
+      ];
     }
 
-    if (frameId.startsWith('W') && frameId != 'WXXX') {
+    if (id == 'TXXX') {
+      final fields = value is Map ? value : {'value': value};
+      final description =
+          target.qualifier ?? fields['description']?.toString() ?? '';
+      final text = _textFromValue(fields['value'], version);
+      if (text == null) return null;
+      final strings = _encodeStrings([description, text], version);
+      return [
+        Uint8List.fromList([
+          strings.encoding,
+          ...strings.parts[0],
+          ..._terminator(strings.encoding),
+          ...strings.parts[1],
+        ]),
+      ];
+    }
+
+    if (id == 'POPM') {
+      // A rating from 0 to 255, or {email, rating, counter}.
+      final fields = value is Map ? value : {'rating': value};
+      final rating = fields['rating'];
+      final counter = fields['counter'] ?? 0;
+      final email = (fields['email'] ?? '').toString();
+      if (rating is! int || rating < 0 || rating > 255) return null;
+      if (counter is! int || counter < 0 || counter > 0xFFFFFFFF) return null;
+      if (email.codeUnits.any((c) => c > 0xFF)) return null;
+      return [
+        Uint8List.fromList([
+          ...latin1.encode(email),
+          0,
+          rating,
+          ...intToBytes(counter, 4),
+        ]),
+      ];
+    }
+
+    if (id.startsWith('W') && id != 'WXXX') {
       // URL frames are plain ISO-8859-1 with no encoding byte.
-      return value is String ? Uint8List.fromList(latin1.encode(value)) : null;
+      return value is String
+          ? [Uint8List.fromList(latin1.encode(value))]
+          : null;
     }
 
-    if (frameId.startsWith('T') && frameId != 'TXXX') {
-      final textValue = _textFromValue(value, version);
-      if (textValue == null) return null;
-      final text = _encodeText(textValue, version);
-      return Uint8List.fromList([text.encoding, ...text.bytes]);
+    if (id.startsWith('T')) {
+      final text = _textFromValue(value, version);
+      if (text == null) return null;
+      final strings = _encodeStrings([text], version);
+      return [Uint8List.fromList([strings.encoding, ...strings.parts[0]])];
     }
 
     return null;
   }
 
-  Uint8List _encodePictureFrame(Uint8List picture) {
+  /// Encodes a picture, given as image bytes or as a map in the shape that
+  /// reading produces: `data` and optionally `mimeType`, `pictureType` and
+  /// `description`.
+  Uint8List? _encodePictureFrame(dynamic picture) {
+    final fields = picture is Map ? picture : {'data': picture};
+    final data = fields['data'];
+    if (data is! Uint8List) return null;
+
+    final mimeType = (fields['mimeType'] ?? _getMimeType(data)).toString();
+    final pictureType = fields['pictureType'] ?? 3; // 3 is the front cover
+    final description = (fields['description'] ?? 'Cover').toString();
+    if (pictureType is! int || pictureType < 0 || pictureType > 20) return null;
+    if (mimeType.codeUnits.any((c) => c > 0x7F)) return null;
+
+    final strings = _encodeStrings([description], _writeVersion, preferLatin1: true);
     return Uint8List.fromList([
-      0x00, // text encoding (ISO-8859-1)
-      ...ascii.encode(_getMimeType(picture)),
+      strings.encoding,
+      ...ascii.encode(mimeType),
       0x00,
-      0x03, // picture type: front cover
-      ...ascii.encode('Cover'),
-      0x00,
-      ...picture,
+      pictureType,
+      ...strings.parts[0],
+      ..._terminator(strings.encoding),
+      ...data,
     ]);
   }
 
@@ -1453,8 +1712,12 @@ class ID3Handler extends CodecHandler {
   /// Applies the queued operations and rewrites the file.
   ///
   /// Setting a key replaces every frame with that ID, and removing a key
-  /// removes them all. The file is only replaced once the new one has been
-  /// written completely, so a failure leaves the original untouched.
+  /// removes them all. The exceptions are `TXXX` and `POPM` frames, which are
+  /// told apart by their description and owner: `TXXX:Mood` sets the user text
+  /// frame described as "Mood" and leaves the others alone. If the file has an
+  /// ID3v1 tag, the fields that were changed are updated in it too. The file
+  /// is only replaced once the new one has been written completely, so a
+  /// failure leaves the original untouched.
   ///
   /// Throws an [ID3Exception] if a value cannot be encoded or the file cannot
   /// be written.
@@ -1466,21 +1729,23 @@ class ID3Handler extends CodecHandler {
     }
 
     final frames = List<ID3v2Frame>.of(_id3v2Tag.frames);
+    final changes = <String, dynamic>{};
     for (final operation in pendingOperations) {
       switch (operation.type) {
         case OperationType.add:
         case OperationType.update:
-          _addOrUpdateFrame(frames, operation.key, operation.value);
+          _addOrUpdateFrames(frames, operation.key, operation.value);
+          changes[operation.key] = operation.value;
           break;
         case OperationType.remove:
-          final frameId = _frameIdFor(operation.key, _writeVersion);
-          frames.removeWhere((frame) => frame.id == frameId);
+          _removeFrames(frames, operation.key);
+          changes[operation.key] = null;
           break;
       }
     }
 
     try {
-      await _safeWrite(frames);
+      await _safeWrite(frames, changes);
     } catch (e) {
       throw ID3Exception('Failed to apply metadata changes: $e');
     }
@@ -1489,25 +1754,44 @@ class ID3Handler extends CodecHandler {
     parseMetadata(); // Rebuild the metadata and tag from the new file
   }
 
-  void _addOrUpdateFrame(List<ID3v2Frame> frames, String key, dynamic value) {
-    final encodedFrame = encodeMetadataFrame(key, value);
-    if (encodedFrame == null) {
+  void _addOrUpdateFrames(List<ID3v2Frame> frames, String key, dynamic value) {
+    final encoded = _encodeFrames(key, value);
+    if (encoded == null) {
       throw ID3Exception('Failed to encode metadata for key: $key');
     }
 
-    final index = frames.indexWhere((frame) => frame.id == encodedFrame.id);
-    frames.removeWhere((frame) => frame.id == encodedFrame.id);
+    final id = encoded.first.id;
+    final identity = _frameIdentity(encoded.first);
+    bool replaced(ID3v2Frame frame) =>
+        frame.id == id && (identity == null || _frameIdentity(frame) == identity);
+
+    final index = frames.indexWhere(replaced);
+    frames.removeWhere(replaced);
     // Keep the frame where it was so the tag order stays stable.
-    frames.insert(index == -1 ? frames.length : index, encodedFrame);
+    frames.insertAll(index == -1 ? frames.length : index, encoded);
+  }
+
+  void _removeFrames(List<ID3v2Frame> frames, String key) {
+    final target = _frameTarget(key, _writeVersion);
+    // A rating belongs to the owner without an e-mail address.
+    final identity = target.id == 'POPM' ? '' : target.qualifier;
+    frames.removeWhere(
+      (frame) =>
+          frame.id == target.id &&
+          (identity == null || _frameIdentity(frame) == identity),
+    );
   }
 
   /// Writes the updated file next to the original and renames it over the
   /// original, so the original is never half-written.
-  Future<void> _safeWrite(List<ID3v2Frame> frames) async {
+  Future<void> _safeWrite(
+    List<ID3v2Frame> frames,
+    Map<String, dynamic> changes,
+  ) async {
     final path = file.path;
     final tempFile = File('$path.tmp');
     try {
-      await _writeWithFrames(tempFile.path, frames);
+      await _writeWithFrames(tempFile.path, frames, changes: changes);
       await tempFile.rename(path);
     } catch (e) {
       logger.e('Error during file write: $e');
