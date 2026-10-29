@@ -21,8 +21,9 @@ Tests (all in `test/`):
 - `atoms_test.dart`: the MP4 `Atom` class.
 - `id3_write_test.dart` and `mp4_write_test.dart`: the write paths. They build small ID3 and MP4 files from raw bytes in a temp directory, edit them through the handlers and check the bytes on disk (audio/`mdat` preserved, `stco` chunk offsets, tag versions, failures leaving the file untouched).
 - `mp4_read_test.dart`: `mvhd` parsing.
+- `id3_write_test.dart` also covers ID3 reading details (ID3v1 vs ID3v2, duration from MPEG frames).
 
-There are no tests for the read path with real files, so also verify parser changes by running the example against a folder of real audio files. When changing a write path, add a test that fails on the old behaviour.
+All fixtures are hand-built, so also verify parser changes against real audio files (`ffmpeg` can generate MP3 and M4A files; compare the decoded audio before and after an edit with `ffmpeg -map 0:a -c copy -f md5 -`) or by running the example against a folder. When changing a write path, add a test that fails on the old behaviour.
 
 ## Architecture
 
