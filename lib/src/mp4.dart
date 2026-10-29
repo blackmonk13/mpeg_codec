@@ -412,19 +412,26 @@ class MP4Handler extends CodecHandler {
     final atomData = atom!.data!;
     final version = atomData[0];
 
-    final actualData = atomData.sublist(4);
-    // print(String.fromCharCodes(actualData));
-    if (version == 1) {
-      setMetadata('creationTime', _decodeInt(actualData.sublist(4, 12)));
-      setMetadata('modificationTime', _decodeInt(actualData.sublist(12, 20)));
-      setMetadata('timescale', _decodeInt(actualData.sublist(20, 24)));
-      setMetadata('duration', _decodeInt(actualData.sublist(24)));
-    } else {
-      setMetadata('creationTime', _decodeInt(actualData.sublist(4, 8)));
-      setMetadata('modificationTime', _decodeInt(actualData.sublist(8, 12)));
-      setMetadata('timescale', _decodeInt(actualData.sublist(12, 16)));
-      setMetadata('duration', _decodeInt(actualData.sublist(16)));
+    // After the version and flags: creation time, modification time,
+    // timescale and duration, with 64-bit times in version 1.
+    final timeWidth = version == 1 ? 8 : 4;
+    final length = 4 + 2 * timeWidth + 4 + timeWidth;
+    if (atomData.length < length) {
+      logger.d('mvhd atom is too short: ${atomData.length} bytes');
+      return;
     }
+
+    var position = 4;
+    Uint8List take(int width) {
+      final bytes = atomData.sublist(position, position + width);
+      position += width;
+      return bytes;
+    }
+
+    setMetadata('creationTime', _decodeInt(take(timeWidth)));
+    setMetadata('modificationTime', _decodeInt(take(timeWidth)));
+    setMetadata('timescale', _decodeInt(take(4)));
+    setMetadata('duration', _decodeInt(take(timeWidth)));
   }
 
   /// Parses and processes the 'ftyp' atom from an MP4 file.
