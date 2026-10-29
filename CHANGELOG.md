@@ -1,3 +1,33 @@
+## 2.1.0
+
+Additions
+
+- Edits are made in place when the new tag fits in the space of the old one
+  (ID3 padding, MP4 `free` atoms), without copying the audio. Pass
+  `applyMetadataChanges(inPlace: false)` for the temporary file and rename of
+  2.0.0. Tags that have to grow get padding (`ID3Handler.tagPadding`,
+  `MP4Handler.freePadding`) so the next edit fits.
+- `ID3Handler.readMetadata(path)` and `MP4Handler.readMetadata(path)` read in
+  another isolate.
+- `addMetadata` appends cover art (`cover`, `picture`) to the pictures that are
+  there; `updateMetadata` replaces them.
+- Fragmented MP4 files can be edited: `tfhd`, `sidx` and `tfra` offsets are
+  moved with the media, where 2.0.0 refused.
+- ID3 writing of `WXXX` (`userDefinedUrl`), `SYLT` (`synchronizedLyrics`),
+  `CHAP` (`chapter_<id>`) and `CTOC` (`tableOfContents_<id>`) frames.
+- ID3 unsynchronization is applied when writing a tag that has false MPEG
+  syncs in it (2.3 for the tag, 2.4 for the frame).
+
+Fixes
+
+- ID3 reading: `SYLT`, `CHAP` and `CTOC` frames could not be read (the tag
+  was not set yet), `SYLT` entries were read in the wrong order, chapter
+  titles replaced the title of the track, `WXXX` was not read, unsynchronized
+  2.4 frames were not undone, and an unsynchronized 2.3 tag lost a byte at the
+  end.
+- MP4: `free` and `skip` atoms are no longer read into memory.
+- Operations queued while `applyMetadataChanges` is writing stay queued.
+
 ## 2.0.0
 
 Breaking changes

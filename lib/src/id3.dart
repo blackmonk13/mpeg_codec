@@ -1,14 +1,17 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'dart:math' as math;
 
 import 'package:archive/archive.dart';
+import 'package:logger/logger.dart';
 
 import 'exceptions.dart';
 import 'genres.dart';
 import 'id3_tags.dart';
 import 'handler.dart';
+import 'metadata.dart';
 
 final Map<String, String> _friendlyToFrameIds = {
   'title': 'TIT2',
@@ -41,6 +44,7 @@ final Map<String, String> _friendlyToFrameIds = {
   'releaseTime': 'TDRL',
   'taggingTime': 'TDTG',
   'website': 'WOAR',
+  'userDefinedUrl': 'WXXX',
   'rating': 'POPM',
   'replayGain': 'RVA2',
 };
@@ -62,6 +66,14 @@ class ID3Handler extends CodecHandler {
   /// Offset of the first byte after the ID3v2 tag (0 if there is none).
   int _audioStart = 0;
 
+  /// Whether the ID3v2.4 tag being parsed says all its frames are
+  /// unsynchronized.
+  bool _tagUnsynchronized = false;
+
+  /// The version of the ID3v2 tag being parsed. The tag itself is only set
+  /// once parsing is done.
+  int _parseVersion = 4;
+
   /// Every APIC frame of the tag, in order. `picture` is the last one.
   List<Map<String, dynamic>> _pictures = [];
 
@@ -70,6 +82,20 @@ class ID3Handler extends CodecHandler {
 
   /// A map of grouped frames, used for storing frames that are part of a group.
   final Map<String, List<Map<String, dynamic>>> _groupedFrames = {};
+
+  /// Reads the metadata of the file at [path] in a separate isolate, so the
+  /// calling isolate (the UI isolate of a Flutter app, for example) is not
+  /// blocked by the file reads. Returns the same [Metadata] that
+  /// `ID3Handler(path).metadata` has.
+  ///
+  /// [Logger.level] is set per isolate, so the level in use here is passed on.
+  static Future<Metadata> readMetadata(String path) {
+    final level = Logger.level;
+    return Isolate.run(() {
+      Logger.level = level;
+      return ID3Handler(path).metadata;
+    });
+  }
 
   ID3Handler(super.filePath) {
     parseMetadata();
@@ -148,7 +174,10 @@ class ID3Handler extends CodecHandler {
       }
 
       var tagData = file.readSync(size);
-      if (unsynchronization) {
+      // In ID3v2.3 the whole tag is unsynchronized. In ID3v2.4 it is done frame
+      // by frame, and the tag flag says that all of them are.
+      _tagUnsynchronized = version == 4 && unsynchronization;
+      if (unsynchronization && version != 4) {
         tagData = _removeUnsynchronization(tagData);
       }
 
@@ -232,6 +261,7 @@ class ID3Handler extends CodecHandler {
   /// Returns:
   /// A list of [ID3v2Frame] objects, each representing a parsed frame.
   List<ID3v2Frame> _parseID3v2Frames(Uint8List data, int version) {
+    _parseVersion = version;
     List<ID3v2Frame> frames = [];
     int offset = 0;
 
@@ -258,6 +288,9 @@ class ID3Handler extends CodecHandler {
 
       var frameData = data.sublist(offset + 10, offset + 10 + frameSize);
       try {
+        // Remember that a frame is unsynchronized even when only the tag says
+        // so, since the tag flag is not written back.
+        if (version == 4 && _tagUnsynchronized) frameFlags |= 0x0002;
         ID3v2Frame frame =
             ID3v2Frame(frameId, frameSize, frameData, flags: frameFlags);
         // Keep the frame even if its metadata cannot be parsed, so that
@@ -297,6 +330,9 @@ class ID3Handler extends CodecHandler {
 
     int dataOffset = dataLengthIndicator ? 4 : 0;
     Uint8List decompressedData = frame.data.sublist(dataOffset);
+    if (version == 4 && (frameFlags & 0x0002) != 0) {
+      decompressedData = _removeUnsynchronization(decompressedData);
+    }
 
     if (compressed) {
       try {
@@ -349,6 +385,9 @@ class ID3Handler extends CodecHandler {
       case 'TXXX':
         _parseUserDefinedTextFrame(data);
         break;
+      case 'WXXX':
+        _parseUserDefinedUrlFrame(data);
+        break;
       case 'COMM':
         _parseCommentFrame(data);
         break;
@@ -362,13 +401,13 @@ class ID3Handler extends CodecHandler {
         _parseUnsynchronizedLyricsFrame(data);
         break;
       case 'SYLT':
-        _parseSynchronizedLyricsFrame(data, _id3v2Tag.version);
+        _parseSynchronizedLyricsFrame(data, _parseVersion);
         break;
       case 'CHAP':
-        _parseChapterFrame(data, _id3v2Tag.version);
+        _parseChapterFrame(data, _parseVersion);
         break;
       case 'CTOC':
-        _parseTableOfContentsFrame(data, _id3v2Tag.version);
+        _parseTableOfContentsFrame(data, _parseVersion);
         break;
       case 'PRIV':
         _parsePrivateFrame(data);
@@ -411,101 +450,137 @@ class ID3Handler extends CodecHandler {
   /// - [data]: The raw data of the synchronized lyrics frame.
   /// - [version]: The version of the ID3v2 tag.
   void _parseSynchronizedLyricsFrame(Uint8List data, int version) {
-    int encoding = data[0];
-    String language = String.fromCharCodes(data.sublist(1, 4));
-    int timeStampFormat = data[4];
-    int contentType = data[5];
-    var contentData = data.sublist(6);
-    var parts = _splitNullTerminated(contentData, encoding);
-    if (parts.length >= 2) {
-      String description = _decodeString(parts[0], encoding);
-      List<Map<String, dynamic>> syncedLyrics = [];
-      var lyricsData = parts[1];
-      int offset = 0;
-      while (offset < lyricsData.length - 4) {
-        int timeStamp =
-            ByteData.view(lyricsData.buffer).getUint32(offset, Endian.big);
-        offset += 4;
-        int endOffset = lyricsData.indexOf(0, offset);
-        if (endOffset == -1) endOffset = lyricsData.length;
-        String text =
-            _decodeString(lyricsData.sublist(offset, endOffset), encoding);
-        syncedLyrics.add({'timeStamp': timeStamp, 'text': text});
-        offset = endOffset + 1;
-      }
-      setMetadata('synchronizedLyrics', {
-        'language': language,
-        'timeStampFormat': timeStampFormat,
-        'contentType': contentType,
-        'description': description,
-        'lyrics': syncedLyrics
-      });
+    if (data.length < 7) return;
+    final encoding = data[0];
+    final language = String.fromCharCodes(data.sublist(1, 4));
+    final timeStampFormat = data[4];
+    final contentType = data[5];
+    final step = encoding == 1 || encoding == 2 ? 2 : 1;
+
+    var offset = 6;
+    final descriptionEnd = _findNullTerminator(data, offset, encoding);
+    final description =
+        _decodeString(data.sublist(offset, descriptionEnd), encoding);
+    offset = descriptionEnd + step;
+
+    // Each entry is a string, its terminator, and a 4-byte time stamp. The
+    // time stamps are binary, so the entries cannot be found by splitting on
+    // zero bytes.
+    final syncedLyrics = <Map<String, dynamic>>[];
+    final view = ByteData.sublistView(data);
+    while (offset < data.length) {
+      final end = _findNullTerminator(data, offset, encoding);
+      final text = _decodeString(data.sublist(offset, end), encoding);
+      offset = end + step;
+      if (offset + 4 > data.length) break;
+      syncedLyrics.add({'timeStamp': view.getUint32(offset), 'text': text});
+      offset += 4;
     }
+
+    setMetadata('synchronizedLyrics', {
+      'language': language,
+      'timeStampFormat': timeStampFormat,
+      'contentType': contentType,
+      'description': description,
+      'lyrics': syncedLyrics,
+    });
+  }
+
+  /// Parses the ID3v2 user defined URL frame (`WXXX`): an encoding byte, a
+  /// description and a URL, which is always ISO-8859-1.
+  void _parseUserDefinedUrlFrame(Uint8List data) {
+    if (data.isEmpty) return;
+    final encoding = data[0];
+    final step = encoding == 1 || encoding == 2 ? 2 : 1;
+    final end = _findNullTerminator(data, 1, encoding);
+    final description = _decodeString(data.sublist(1, end), encoding);
+    final urlStart = math.min(end + step, data.length);
+    setMetadata('userDefinedUrl', {
+      'description': description,
+      'url': latin1.decode(data.sublist(urlStart), allowInvalid: true),
+    });
+  }
+
+  /// The text frames inside the frames of a `CHAP` or `CTOC` frame, as frame
+  /// ID to text. Other frames in there are left out.
+  Map<String, String> _readSubFrames(Uint8List data, int version) {
+    final texts = <String, String>{};
+    final view = ByteData.sublistView(data);
+    var offset = 0;
+    while (offset + 10 <= data.length && data[offset] != 0) {
+      final id = String.fromCharCodes(data.sublist(offset, offset + 4));
+      final size = version == 4
+          ? _syncSafeInteger(data.sublist(offset + 4, offset + 8))
+          : view.getUint32(offset + 4);
+      offset += 10;
+      if (offset + size > data.length) break;
+      if (id.startsWith('T') && id != 'TXXX') {
+        final values = _decodeTextFrame(data.sublist(offset, offset + size));
+        if (values.isNotEmpty) texts[id] = values.first;
+      }
+      offset += size;
+    }
+    return texts;
   }
 
   /// Parses the ID3v2 chapter frame.
   ///
   /// This function extracts the chapter element ID, start and end times, start and end offsets,
-  /// and sub-frames from the given [data] and [version]. It then sets the extracted information
-  /// as metadata with the key 'chapter_{elementId}'.
+  /// and the text sub-frames (the chapter title is in `TIT2`) from the given [data] and [version].
+  /// It then sets the extracted information as metadata with the key 'chapter_{elementId}'.
+  /// The sub-frames are not added to the metadata of the file itself.
   ///
   /// Parameters:
   /// - [data]: The byte data containing the chapter frame.
   /// - [version]: The version of the ID3v2 tag.
   void _parseChapterFrame(Uint8List data, int version) {
-    int elementIdEnd = data.indexOf(0);
-    String elementId = String.fromCharCodes(data.sublist(0, elementIdEnd));
-    int startTime =
-        ByteData.view(data.buffer).getUint32(elementIdEnd + 1, Endian.big);
-    int endTime =
-        ByteData.view(data.buffer).getUint32(elementIdEnd + 5, Endian.big);
-    int startOffset =
-        ByteData.view(data.buffer).getUint32(elementIdEnd + 9, Endian.big);
-    int endOffset =
-        ByteData.view(data.buffer).getUint32(elementIdEnd + 13, Endian.big);
-    var subFrames = data.sublist(elementIdEnd + 17);
-    Map<String, dynamic> chapterInfo = {
+    final elementIdEnd = data.indexOf(0);
+    if (elementIdEnd == -1 || elementIdEnd + 17 > data.length) return;
+    final elementId = latin1.decode(data.sublist(0, elementIdEnd));
+    final view = ByteData.sublistView(data);
+    final subFrames = _readSubFrames(data.sublist(elementIdEnd + 17), version);
+    setMetadata('chapter_$elementId', {
       'elementId': elementId,
-      'startTime': startTime,
-      'endTime': endTime,
-      'startOffset': startOffset,
-      'endOffset': endOffset,
-      'subFrames': {}
-    };
-    _parseID3v2Frames(subFrames, version); // Parse sub-frames
-    setMetadata('chapter_$elementId', chapterInfo);
+      'startTime': view.getUint32(elementIdEnd + 1),
+      'endTime': view.getUint32(elementIdEnd + 5),
+      'startOffset': view.getUint32(elementIdEnd + 9),
+      'endOffset': view.getUint32(elementIdEnd + 13),
+      'subFrames': subFrames,
+      if (subFrames.containsKey('TIT2')) 'title': subFrames['TIT2'],
+    });
   }
 
   /// Parses the ID3v2 table of contents (TOC) frame.
   ///
-  /// This function extracts the element ID, flags, entry count, child IDs, and sub-frames from the given [data] and [version].
+  /// This function extracts the element ID, flags, entry count, child IDs, and text sub-frames from the given [data] and [version].
   /// It then sets the extracted information as metadata with the key 'tableOfContents_{elementId}'.
   ///
   /// Parameters:
   /// - [data]: The byte data containing the TOC frame.
   /// - [version]: The version of the ID3v2 tag.
   void _parseTableOfContentsFrame(Uint8List data, int version) {
-    int elementIdEnd = data.indexOf(0);
-    String elementId = String.fromCharCodes(data.sublist(0, elementIdEnd));
-    int flags = data[elementIdEnd + 1];
-    int entryCount = data[elementIdEnd + 2];
-    List<String> children = [];
-    int offset = elementIdEnd + 3;
-    for (int i = 0; i < entryCount; i++) {
-      int childIdEnd = data.indexOf(0, offset);
-      String childId = String.fromCharCodes(data.sublist(offset, childIdEnd));
-      children.add(childId);
+    final elementIdEnd = data.indexOf(0);
+    if (elementIdEnd == -1 || elementIdEnd + 3 > data.length) return;
+    final elementId = latin1.decode(data.sublist(0, elementIdEnd));
+    final flags = data[elementIdEnd + 1];
+    final entryCount = data[elementIdEnd + 2];
+    final children = <String>[];
+    var offset = elementIdEnd + 3;
+    for (var i = 0; i < entryCount; i++) {
+      final childIdEnd = data.indexOf(0, offset);
+      if (childIdEnd == -1) return;
+      children.add(latin1.decode(data.sublist(offset, childIdEnd)));
       offset = childIdEnd + 1;
     }
-    var subFrames = data.sublist(offset);
-    Map<String, dynamic> tocInfo = {
+    final subFrames = _readSubFrames(data.sublist(offset), version);
+    setMetadata('tableOfContents_$elementId', {
       'elementId': elementId,
       'isOrdered': (flags & 0x01) != 0,
+      'isTopLevel': (flags & 0x02) != 0,
       'children': children,
-      'subFrames': {}
-    };
-    _parseID3v2Frames(subFrames, version); // Parse sub-frames
-    setMetadata('tableOfContents_$elementId', tocInfo);
+      'subFrames': subFrames,
+      if (subFrames.containsKey('TIT2')) 'title': subFrames['TIT2'],
+    });
   }
 
   /// Parses the ID3v2 private frame and sets the corresponding metadata.
@@ -1047,18 +1122,41 @@ class ID3Handler extends CodecHandler {
   /// Returns:
   /// A new [Uint8List] containing the [data] with unsynchronization bytes removed.
   Uint8List _removeUnsynchronization(Uint8List data) {
-    ByteData result = ByteData(data.length);
-    int writeIndex = 0;
-    for (int i = 0; i < data.length - 1; i++) {
-      result.setUint8(writeIndex++, data[i]);
-      if (data[i] == 0xFF && data[i + 1] == 0x00) {
+    final result = BytesBuilder(copy: false);
+    for (var i = 0; i < data.length; i++) {
+      result.addByte(data[i]);
+      if (data[i] == 0xFF && i + 1 < data.length && data[i + 1] == 0x00) {
         i++;
       }
     }
-    if (data.isNotEmpty) {
-      result.setUint8(writeIndex++, data.last);
+    return result.takeBytes();
+  }
+
+  /// Whether [data] has to be unsynchronized: a 0xFF byte that is followed by
+  /// 0x00, by a byte that has the top three bits set (which looks like the
+  /// start of an MPEG frame), or by nothing.
+  bool _needsUnsynchronization(Uint8List data) {
+    for (var i = 0; i < data.length; i++) {
+      if (data[i] != 0xFF) continue;
+      if (i + 1 == data.length || data[i + 1] == 0x00 || data[i + 1] >= 0xE0) {
+        return true;
+      }
     }
-    return result.buffer.asUint8List(0, writeIndex);
+    return false;
+  }
+
+  /// Inserts a 0x00 byte after every 0xFF that [_needsUnsynchronization]
+  /// looks for.
+  Uint8List _unsynchronize(Uint8List data) {
+    final result = BytesBuilder(copy: false);
+    for (var i = 0; i < data.length; i++) {
+      result.addByte(data[i]);
+      if (data[i] == 0xFF &&
+          (i + 1 == data.length || data[i + 1] == 0x00 || data[i + 1] >= 0xE0)) {
+        result.addByte(0x00);
+      }
+    }
+    return result.takeBytes();
   }
 
   /// Decodes a string from the given [data] using the specified [encoding].
@@ -1302,7 +1400,59 @@ class ID3Handler extends CodecHandler {
   /// it is 2.3, otherwise 2.4.
   int get _writeVersion => _id3v2Tag.version == 3 ? 3 : 4;
 
-  /// Writes the file with [frames] as its ID3v2 tag.
+  /// How many bytes of padding follow a tag that is written to a new file, so
+  /// that later edits that grow the tag a little still fit.
+  static const int tagPadding = 1024;
+
+  /// The frames of the tag as bytes, with the tag header flags that go with
+  /// them. Parts that look like the start of an MPEG frame are
+  /// unsynchronized: in ID3v2.4 each frame on its own (and flagged as such),
+  /// in ID3v2.3 the tag as a whole.
+  ({Uint8List body, int flags}) _buildTag(List<ID3v2Frame> frames) {
+    final version = _writeVersion;
+    final tag = BytesBuilder(copy: false);
+
+    for (final frame in frames) {
+      var data = frame.data;
+      var flags = frame.flags;
+      if (version == 4 &&
+          (flags & 0x0002) == 0 &&
+          _needsUnsynchronization(data)) {
+        data = _unsynchronize(data);
+        flags |= 0x0002;
+      }
+
+      final header = ByteData(10);
+      for (var i = 0; i < 4; i++) {
+        header.setUint8(i, frame.id.codeUnitAt(i));
+      }
+      if (version == 4) {
+        header.buffer.asUint8List().setRange(4, 8, _getSyncSafeBytes(data.length));
+      } else {
+        header.setUint32(4, data.length, Endian.big);
+      }
+      header.setUint16(8, flags, Endian.big);
+      tag.add(header.buffer.asUint8List());
+      tag.add(data);
+    }
+
+    var body = tag.takeBytes();
+    var tagFlags = 0;
+    if (version == 3 && _needsUnsynchronization(body)) {
+      body = _unsynchronize(body);
+      tagFlags = 0x80;
+    }
+    return (body: body, flags: tagFlags);
+  }
+
+  Uint8List _tagHeader(int flags, int size) => Uint8List.fromList([
+        0x49, 0x44, 0x33, // 'ID3'
+        _writeVersion, 0x00, // version and revision
+        flags, // no extended header or footer
+        ..._getSyncSafeBytes(size),
+      ]);
+
+  /// Writes the file with [frames] as its ID3v2 tag, to a new file.
   ///
   /// If the file has an ID3v1 tag, the fields named in [changes] (a map of
   /// friendly key to new value, `null` for a removed key) are updated in it so
@@ -1312,41 +1462,14 @@ class ID3Handler extends CodecHandler {
     List<ID3v2Frame> frames, {
     Map<String, dynamic> changes = const {},
   }) async {
-    final version = _writeVersion;
-    final tag = BytesBuilder(copy: false);
-
-    for (final frame in frames) {
-      final header = ByteData(10);
-      for (var i = 0; i < 4; i++) {
-        header.setUint8(i, frame.id.codeUnitAt(i));
-      }
-      if (version == 4) {
-        header.buffer.asUint8List().setRange(
-              4,
-              8,
-              _getSyncSafeBytes(frame.data.length),
-            );
-      } else {
-        header.setUint32(4, frame.data.length, Endian.big);
-      }
-      header.setUint16(8, frame.flags, Endian.big);
-      tag.add(header.buffer.asUint8List());
-      tag.add(frame.data);
-    }
-
-    final tagBytes = tag.takeBytes();
-    final tagHeader = Uint8List.fromList([
-      0x49, 0x44, 0x33, // 'ID3'
-      version, 0x00, // version and revision
-      0x00, // flags: no unsynchronization, extended header or footer
-      ..._getSyncSafeBytes(tagBytes.length),
-    ]);
+    final tag = _buildTag(frames);
 
     final input = File(file.path).openSync(mode: FileMode.read);
     final output = File(outputPath).openSync(mode: FileMode.write);
     try {
-      output.writeFromSync(tagHeader);
-      output.writeFromSync(tagBytes);
+      output.writeFromSync(_tagHeader(tag.flags, tag.body.length + tagPadding));
+      output.writeFromSync(tag.body);
+      output.writeFromSync(Uint8List(tagPadding));
 
       final length = input.lengthSync();
       final start = math.min(_audioStart, length);
@@ -1363,11 +1486,11 @@ class ID3Handler extends CodecHandler {
         }
       }
 
-      input.setPositionSync(start);
+      await input.setPosition(start);
       final buffer = Uint8List(1024 * 1024);
       var remaining = audioEnd - start;
       while (remaining > 0) {
-        final bytesRead = input.readIntoSync(
+        final bytesRead = await input.readInto(
           buffer,
           0,
           math.min(remaining, buffer.length),
@@ -1375,7 +1498,7 @@ class ID3Handler extends CodecHandler {
         if (bytesRead == 0) {
           throw ID3Exception('Unexpected end of file while copying audio');
         }
-        output.writeFromSync(buffer, 0, bytesRead);
+        await output.writeFrom(buffer, 0, bytesRead);
         remaining -= bytesRead;
       }
 
@@ -1388,6 +1511,40 @@ class ID3Handler extends CodecHandler {
     }
 
     logger.d('File written successfully to: $outputPath');
+  }
+
+  /// Replaces the ID3v2 tag in the file itself, without touching the audio,
+  /// when the new tag fits in the space the old tag (with its padding) took.
+  /// The rest of that space becomes padding. Returns `false`, having changed
+  /// nothing, when there is no tag yet or the new one is too big.
+  bool _writeInPlace(List<ID3v2Frame> frames, Map<String, dynamic> changes) {
+    if (_audioStart == 0) return false;
+
+    final tag = _buildTag(frames);
+    final room = _audioStart - 10;
+    if (tag.body.length > room) return false;
+
+    final output = File(file.path).openSync(mode: FileMode.append);
+    try {
+      output.setPositionSync(0);
+      output.writeFromSync(_tagHeader(tag.flags, room));
+      output.writeFromSync(tag.body);
+      output.writeFromSync(Uint8List(room - tag.body.length));
+
+      final length = output.lengthSync();
+      if (changes.isNotEmpty && length - 128 >= _audioStart) {
+        output.setPositionSync(length - 128);
+        final tail = output.readSync(128);
+        if (tail[0] == 0x54 && tail[1] == 0x41 && tail[2] == 0x47) {
+          output.setPositionSync(length - 128);
+          output.writeFromSync(_patchedId3v1(tail, changes));
+        }
+      }
+      output.flushSync();
+    } finally {
+      output.closeSync();
+    }
+    return true;
   }
 
   /// Returns a copy of the ID3v1 tag [original] with the fields named in
@@ -1458,16 +1615,28 @@ class ID3Handler extends CodecHandler {
       return (id: key.substring(0, 4), qualifier: key.substring(5));
     }
     if (key == 'userDefinedText') return (id: 'TXXX', qualifier: null);
+    // The keys that reading uses for chapters and tables of contents.
+    if (key.startsWith('chapter_')) {
+      return (id: 'CHAP', qualifier: key.substring('chapter_'.length));
+    }
+    if (key.startsWith('tableOfContents_')) {
+      return (id: 'CTOC', qualifier: key.substring('tableOfContents_'.length));
+    }
     if (key == 'year' && version == 4) return (id: 'TDRC', qualifier: null);
     return (id: _friendlyToFrameIds[key] ?? key, qualifier: null);
   }
 
   /// What tells frames with the same ID apart: the description of a TXXX
-  /// frame and the owner of a POPM frame. `null` for other frames.
+  /// or WXXX frame, the owner of a POPM frame and the element ID of a CHAP or
+  /// CTOC frame. `null` for other frames.
   String? _frameIdentity(ID3v2Frame frame) {
     final data = frame.data;
     try {
-      if (frame.id == 'TXXX' && data.length > 1) {
+      if (frame.id == 'CHAP' || frame.id == 'CTOC') {
+        final end = data.indexOf(0);
+        return latin1.decode(data.sublist(0, end == -1 ? data.length : end));
+      }
+      if ((frame.id == 'TXXX' || frame.id == 'WXXX') && data.length > 1) {
         final description = _splitNullTerminated(data.sublist(1), data[0]);
         return description.isEmpty ? '' : _decodeString(description[0], data[0]);
       }
@@ -1651,6 +1820,129 @@ class ID3Handler extends CodecHandler {
       ];
     }
 
+    if (id == 'WXXX') {
+      // A description and a URL: {description, url}, or just the URL.
+      final fields = value is Map ? value : {'url': value};
+      final description =
+          target.qualifier ?? (fields['description'] ?? '').toString();
+      final url = fields['url'];
+      if (url is! String || url.codeUnits.any((c) => c > 0xFF)) return null;
+      final strings = _encodeStrings([description], version);
+      return [
+        Uint8List.fromList([
+          strings.encoding,
+          ...strings.parts[0],
+          ..._terminator(strings.encoding),
+          ...latin1.encode(url), // always ISO-8859-1
+        ]),
+      ];
+    }
+
+    if (id == 'SYLT') {
+      // The shape that reading produces: language, timeStampFormat (1 is MPEG
+      // frames, 2 is milliseconds), contentType (1 is lyrics), description and
+      // lyrics, a list of {timeStamp, text}.
+      if (value is! Map) return null;
+      final lines = value['lyrics'];
+      if (lines is! List || lines.isEmpty) return null;
+      final language = (value['language'] ?? 'eng').toString();
+      final format = value['timeStampFormat'] ?? 2;
+      final contentType = value['contentType'] ?? 1;
+      if (language.length != 3 || language.codeUnits.any((c) => c > 0x7F)) {
+        return null;
+      }
+      if (format is! int || format < 1 || format > 2) return null;
+      if (contentType is! int || contentType < 0 || contentType > 255) {
+        return null;
+      }
+
+      final times = <int>[];
+      final texts = <String>[(value['description'] ?? '').toString()];
+      for (final line in lines) {
+        final time = line is Map ? line['timeStamp'] : null;
+        final text = line is Map ? line['text'] : null;
+        if (time is! int || time < 0 || time > 0xFFFFFFFF || text is! String) {
+          return null;
+        }
+        times.add(time);
+        texts.add(text);
+      }
+
+      final strings = _encodeStrings(texts, version);
+      final terminator = _terminator(strings.encoding);
+      return [
+        Uint8List.fromList([
+          strings.encoding,
+          ...ascii.encode(language),
+          format,
+          contentType,
+          ...strings.parts[0],
+          ...terminator,
+          for (var i = 0; i < times.length; i++) ...[
+            ...strings.parts[i + 1],
+            ...terminator,
+            ...intToBytes(times[i], 4),
+          ],
+        ]),
+      ];
+    }
+
+    if (id == 'CHAP') {
+      // The shape that reading produces: elementId, startTime and endTime in
+      // milliseconds, startOffset and endOffset (0xFFFFFFFF when unused), and
+      // text sub-frames. `title` is a shorthand for the TIT2 sub-frame.
+      if (value is! Map) return null;
+      final elementId = _elementId(target.qualifier ?? value['elementId']);
+      final subFrames = _subFrames(value, version);
+      if (elementId == null || subFrames == null) return null;
+
+      final numbers = <int>[];
+      for (final entry in {
+        'startTime': 0,
+        'endTime': 0,
+        'startOffset': 0xFFFFFFFF,
+        'endOffset': 0xFFFFFFFF,
+      }.entries) {
+        final number = value[entry.key] ?? entry.value;
+        if (number is! int || number < 0 || number > 0xFFFFFFFF) return null;
+        numbers.add(number);
+      }
+      return [
+        Uint8List.fromList([
+          ...elementId,
+          0,
+          for (final number in numbers) ...intToBytes(number, 4),
+          ...subFrames,
+        ]),
+      ];
+    }
+
+    if (id == 'CTOC') {
+      // elementId, children (a list of element IDs), isOrdered, isTopLevel and
+      // text sub-frames.
+      if (value is! Map) return null;
+      final elementId = _elementId(target.qualifier ?? value['elementId']);
+      final subFrames = _subFrames(value, version);
+      final children = value['children'] ?? <String>[];
+      if (elementId == null || subFrames == null) return null;
+      if (children is! List || children.length > 255) return null;
+
+      final childIds = [for (final child in children) _elementId(child)];
+      if (childIds.contains(null)) return null;
+      final ordered = value['isOrdered'] == true ? 0x01 : 0;
+      final topLevel = value['isTopLevel'] == true ? 0x02 : 0;
+      return [
+        Uint8List.fromList([
+          ...elementId,
+          0,
+          ordered | topLevel,
+          childIds.length,
+          for (final child in childIds) ...[...child!, 0],
+          ...subFrames,
+        ]),
+      ];
+    }
+
     if (id.startsWith('W') && id != 'WXXX') {
       // URL frames are plain ISO-8859-1 with no encoding byte.
       return value is String
@@ -1666,6 +1958,54 @@ class ID3Handler extends CodecHandler {
     }
 
     return null;
+  }
+
+  /// An element ID of a chapter or table of contents frame as bytes, or
+  /// `null` if it is empty, not text or has characters ISO-8859-1 cannot hold.
+  List<int>? _elementId(dynamic id) {
+    if (id is! String || id.isEmpty) return null;
+    if (id.codeUnits.any((c) => c == 0 || c > 0xFF)) return null;
+    return latin1.encode(id);
+  }
+
+  /// The text sub-frames of a chapter or table of contents frame, as bytes,
+  /// from the `subFrames` map (frame ID to text) and `title` (a shorthand for
+  /// `TIT2`) of [fields]. Returns `null` if they are not valid.
+  List<int>? _subFrames(Map fields, int version) {
+    final texts = <String, String>{};
+    final given = fields['subFrames'];
+    if (given is Map) {
+      for (final entry in given.entries) {
+        if (entry.key is! String || entry.value is! String) return null;
+        texts[entry.key as String] = entry.value as String;
+      }
+    } else if (given != null) {
+      return null;
+    }
+    final title = fields['title'];
+    if (title is String) {
+      texts['TIT2'] = title;
+    } else if (title != null) {
+      return null;
+    }
+
+    final bytes = <int>[];
+    for (final entry in texts.entries) {
+      if (!RegExp(r'^T[A-Z0-9]{3}$').hasMatch(entry.key) || entry.key == 'TXXX') {
+        return null;
+      }
+      final strings = _encodeStrings([entry.value], version);
+      final body = [strings.encoding, ...strings.parts[0]];
+      bytes.addAll([
+        ...ascii.encode(entry.key),
+        ...(version == 4
+            ? _getSyncSafeBytes(body.length)
+            : intToBytes(body.length, 4)),
+        0, 0, // flags
+        ...body,
+      ]);
+    }
+    return bytes;
   }
 
   /// Encodes a picture, given as image bytes or as a map in the shape that
@@ -1719,10 +2059,18 @@ class ID3Handler extends CodecHandler {
   /// is only replaced once the new one has been written completely, so a
   /// failure leaves the original untouched.
   ///
+  /// If the new tag fits in the space of the old one (the tag plus its
+  /// padding) and [inPlace] is true, only the tag is overwritten and the audio
+  /// is not copied, which is much faster for big files. A failure of the disk
+  /// half way through that write could then leave a damaged tag; pass
+  /// `inPlace: false` to always write a new file and rename it instead. A tag
+  /// that has to grow is always written to a new file, with
+  /// [tagPadding] bytes of padding.
+  ///
   /// Throws an [ID3Exception] if a value cannot be encoded or the file cannot
   /// be written.
   @override
-  Future<void> applyMetadataChanges() async {
+  Future<void> applyMetadataChanges({bool inPlace = true}) async {
     if (pendingOperations.isEmpty) {
       logger.i('No pending metadata operations to apply.');
       return;
@@ -1730,9 +2078,18 @@ class ID3Handler extends CodecHandler {
 
     final frames = List<ID3v2Frame>.of(_id3v2Tag.frames);
     final changes = <String, dynamic>{};
-    for (final operation in pendingOperations) {
+    final operations = List<MetadataOperation>.of(pendingOperations);
+    for (final operation in operations) {
       switch (operation.type) {
         case OperationType.add:
+          // Adding a picture keeps the pictures that are already there.
+          if (_frameTarget(operation.key, _writeVersion).id == 'APIC') {
+            _appendFrames(frames, operation.key, operation.value);
+          } else {
+            _addOrUpdateFrames(frames, operation.key, operation.value);
+          }
+          changes[operation.key] = operation.value;
+          break;
         case OperationType.update:
           _addOrUpdateFrames(frames, operation.key, operation.value);
           changes[operation.key] = operation.value;
@@ -1745,12 +2102,15 @@ class ID3Handler extends CodecHandler {
     }
 
     try {
-      await _safeWrite(frames, changes);
+      if (!inPlace || !_writeInPlace(frames, changes)) {
+        await _safeWrite(frames, changes);
+      }
     } catch (e) {
       throw ID3Exception('Failed to apply metadata changes: $e');
     }
 
-    pendingOperations.clear();
+    // Operations queued while the file was being written stay queued.
+    pendingOperations.removeWhere(operations.contains);
     parseMetadata(); // Rebuild the metadata and tag from the new file
   }
 
@@ -1769,6 +2129,14 @@ class ID3Handler extends CodecHandler {
     frames.removeWhere(replaced);
     // Keep the frame where it was so the tag order stays stable.
     frames.insertAll(index == -1 ? frames.length : index, encoded);
+  }
+
+  void _appendFrames(List<ID3v2Frame> frames, String key, dynamic value) {
+    final encoded = _encodeFrames(key, value);
+    if (encoded == null) {
+      throw ID3Exception('Failed to encode metadata for key: $key');
+    }
+    frames.addAll(encoded);
   }
 
   void _removeFrames(List<ID3v2Frame> frames, String key) {

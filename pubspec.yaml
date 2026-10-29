@@ -1,6 +1,6 @@
 name: mpeg_codec
 description: An MPEG-4 decoder and encoder for Dart.
-version: 2.0.0
+version: 2.1.0
 # repository: https://github.com/my_org/my_repo
 environment:
   sdk: ^3.9.0
