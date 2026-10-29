@@ -15,6 +15,13 @@ class Atom {
   /// The offset of the atom in the file.
   int offset;
 
+  /// Where the atom started in the file it was parsed from. Unlike [offset]
+  /// this is never updated, so it can be used to copy the atom's data.
+  final int sourceOffset;
+
+  /// The size of the atom's header: 8 bytes, or 16 when it has a 64-bit size.
+  int headerSize = 8;
+
   /// The optional data associated with the atom.
   Uint8List? data;
 
@@ -27,7 +34,7 @@ class Atom {
     this.size,
     this.offset, {
     this.data,
-  });
+  }) : sourceOffset = offset;
 
   /// Adds a child atom to the current atom.
   void addChild(Atom child) {
@@ -38,14 +45,14 @@ class Atom {
   void updateSize() {
     if (children.isNotEmpty) {
       size = children.fold(0, (sum, child) => sum + child.size);
-      if (type != 'root') size += 8; // Add 8 for non-root nodes
+      if (type != 'root') size += headerSize; // Add the header for non-root nodes
       if (type == 'meta') size += 4; // Add 4 for meta nodes
     } else if (type == 'mdat' && data == null) {
       // For mdat, keep the existing size if data is null
     } else if (data != null) {
-      size = 8 + data!.length; // Header size + data size
+      size = headerSize + data!.length; // Header size + data size
     } else {
-      size = 8; // Just the header size for empty atoms
+      size = headerSize; // Just the header size for empty atoms
     }
   }
 
@@ -60,7 +67,7 @@ class Atom {
       }
     } else {
       offset = parentOffset;
-      int childOffset = offset + 8; // Start after this atom's header
+      int childOffset = offset + headerSize; // Start after this atom's header
       if (type == 'meta') childOffset += 4; // Additional 4 bytes for meta
 
       for (var child in children) {

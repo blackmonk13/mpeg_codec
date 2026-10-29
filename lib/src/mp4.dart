@@ -11,7 +11,7 @@ import 'handler.dart';
 /// processing, and manipulating MP4 atoms and metadata.
 class MP4Handler extends CodecHandler {
   /// The root atom of the MP4 file.
-  late Atom _root;
+  Atom _root = Atom('root', 0, 0);
 
   static const Map<String, String> _friendlyToAtomNames = {
     'title': '©nam',
@@ -69,24 +69,31 @@ class MP4Handler extends CodecHandler {
   ///   4. Parses the metadata.
   ///   5. Closes the file.
   void _setup() {
+    // Forget anything left over from an earlier parse.
+    metadata.clear();
+
     // Open the file for reading.
     openRead();
 
-    // Build the atom tree of the MP4 file.
-    _root = _buildAtomTree();
+    try {
+      // Build the atom tree of the MP4 file.
+      _root = _buildAtomTree();
 
-    // Print the atom tree.
-    printAtomTree(_root);
+      // Print the atom tree.
+      printAtomTree(_root);
 
-    // Parse the metadata.
-    parseMetadata();
+      // Parse the metadata.
+      parseMetadata();
 
-    if (metadata.asMap().isNotEmpty) {
-      setMetadata('filePath', file.path);
+      if (metadata.asMap().isNotEmpty) {
+        setMetadata('filePath', file.path);
+      }
+    } catch (e) {
+      logger.w('Error parsing metadata: $e');
+    } finally {
+      // Close the file.
+      close();
     }
-
-    // Close the file.
-    close();
   }
 
   /// Builds an atom tree from the given file.
@@ -147,6 +154,7 @@ class MP4Handler extends CodecHandler {
       int size = _readInt32();
       final type = _readFourCC();
 
+      var headerSize = 8;
       if (size == 0) {
         // Atom extends to end of file
         size = end - offset;
@@ -154,36 +162,37 @@ class MP4Handler extends CodecHandler {
         // 64-bit size
         file.setPositionSync(offset + 8);
         size = _readInt64();
+        headerSize = 16;
       }
 
-      if (size < 8 || offset + size > end) {
+      if (size < headerSize || offset + size > end) {
         logger.w(
           'Invalid atom size or overflow: $type, size: $size, offset: $offset',
         );
         break;
       }
 
-      final atom = Atom(type, size, offset);
+      final atom = Atom(type, size, offset)..headerSize = headerSize;
       parent.children.add(atom);
 
       logger.d('Parsed atom: $type, size: $size, offset: $offset');
 
       if (parent.type == 'ilst') {
         // Special handling for 'ilst' children
-        _parseIlstChild(atom, offset + 8, offset + size);
+        _parseIlstChild(atom, offset + headerSize, offset + size);
       } else if (_containerAtoms.contains(type)) {
-        int childStart = offset + 8;
+        int childStart = offset + headerSize;
         if (type == 'meta') {
           // Skip the extra 4 bytes in 'meta' atom
           childStart += 4;
-          file.setPositionSync(offset + 8);
+          file.setPositionSync(offset + headerSize);
           atom.data = file.readSync(4); // Store the extra 4 bytes
         }
         _parseAtomRecursive(atom, childStart, offset + size);
       } else if (type != 'mdat') {
         // Read the data for atoms other than 'mdat'
-        file.setPositionSync(offset + 8);
-        atom.data = file.readSync(size - 8);
+        file.setPositionSync(offset + headerSize);
+        atom.data = file.readSync(size - headerSize);
       }
 
       offset += size;
@@ -522,7 +531,8 @@ class MP4Handler extends CodecHandler {
   /// Returns:
   /// - A list of two integers representing the decoded values.
   List<int> _decodeNumericPair(Uint8List value) {
-    if (value.length >= 8) {
+    // 'trkn' is 8 bytes, 'disk' is 6.
+    if (value.length >= 6) {
       final data = value.buffer.asByteData();
       return [data.getUint16(2), data.getUint16(4)];
     }
@@ -609,6 +619,10 @@ class MP4Handler extends CodecHandler {
   /// - An integer representing the decoded value. If the length of the [value] is less than 4,
   ///   the function returns 0.
   int _decodeInt(Uint8List value) {
+    if (value.isNotEmpty && value.length <= 8) {
+      // Big-endian, whatever the width (tempo is 2 bytes, rating 1).
+      return value.fold(0, (number, byte) => (number << 8) | byte);
+    }
     if (value.length >= 4) {
       return value.buffer.asByteData().getUint32(0, Endian.big);
     }
@@ -766,200 +780,371 @@ class MP4Handler extends CodecHandler {
     _root.updateOffsets(0);
   }
 
+  /// Writes the file, with the current atom tree, to [outputPath].
+  ///
+  /// `mdat` atoms are copied from the original file. If an `mdat` ends up at
+  /// a different position, the chunk offsets in the `stco` and `co64` atoms
+  /// are adjusted to match.
   @override
   Future<void> writeToFile(String outputPath) async {
-    final outputFile = File(outputPath).openSync(mode: FileMode.write);
-
-    try {
-      await _writeAtomRecursive(_root, outputFile, 0);
-    } finally {
-      outputFile.closeSync();
-    }
-
+    updateTreeSizes();
+    _writeTree(outputPath);
     logger.d('File written successfully to: $outputPath');
   }
 
-  /// Recursively writes the given [atom] and its children to the given [outputFile]
-  /// starting at the given [offset].
-  ///
-  /// Parameters:
-  /// - [atom]: The atom to write, or the root atom if writing the entire tree.
-  /// - [outputFile]: The file to which the atom(s) should be written.
-  /// - [offset]: The offset in [outputFile] at which to start writing.
-  ///
-  /// This function writes the size and type of the given [atom] to [outputFile]
-  /// starting at [offset]. If the [atom] is a 'meta' atom, it writes 4 null bytes
-  /// immediately after the type. If the [atom] is an 'mdat' atom, it calls
-  /// [_copyMdatData] to copy the data from the 'mdat' atom to [outputFile]
-  /// starting at [dataOffset]. Otherwise, if the [atom] has data, it writes the
-  /// data to [outputFile] starting at [dataOffset]. If the [atom] has children,
-  /// it recursively calls itself for each child, updating the [offset] as it
-  /// goes.
-  ///
-  /// Returns the new offset in [outputFile] after writing all the data.
-  Future<int> _writeAtomRecursive(
-    Atom atom,
-    RandomAccessFile outputFile,
-    int offset,
-  ) async {
-    if (atom.type == 'root') {
-      int newOffset = offset;
-      for (var child in atom.children) {
-        newOffset = await _writeAtomRecursive(child, outputFile, newOffset);
-      }
-      return newOffset;
+  void _writeTree(String outputPath) {
+    final topLevel = _root.children;
+
+    // Where each top-level atom ends up in the output.
+    final newOffsets = Map<Atom, int>.identity();
+    var position = 0;
+    for (final atom in topLevel) {
+      newOffsets[atom] = position;
+      position += atom.size;
     }
 
-    outputFile.setPositionSync(offset);
-    outputFile.writeFromSync(intToBytes(atom.size, 4));
-    outputFile.writeFromSync(atom.type.codeUnits);
+    final moves = <({int start, int end, int newStart})>[
+      for (final atom in topLevel.where((a) => a.type == 'mdat'))
+        (
+          start: atom.sourceOffset,
+          end: atom.sourceOffset + atom.size,
+          newStart: newOffsets[atom]!,
+        ),
+    ];
+    final moved = moves.any((move) => move.start != move.newStart);
 
-    int dataOffset = offset + 8;
-    if (atom.type == 'meta') {
-      // Write 4 null bytes for 'meta' atom
-      outputFile.writeFromSync(Uint8List(4));
-      dataOffset += 4;
-    }
-
-    if (atom.type == 'mdat') {
-      await _copyMdatData(atom, outputFile, dataOffset);
-    } else if (atom.data != null && atom.type != 'meta') {
-      outputFile.writeFromSync(atom.data!);
-    } else {
-      for (var child in atom.children) {
-        dataOffset = await _writeAtomRecursive(child, outputFile, dataOffset);
-      }
-    }
-
-    return offset + atom.size;
-  }
-
-  /// Copies the data of an 'mdat' atom to the output file.
-  ///
-  /// Parameters:
-  /// - [mdatAtom]: The 'mdat' atom containing the data to be copied.
-  /// - [outputFile]: The file to which the data should be written.
-  /// - [dataOffset]: The offset in [outputFile] at which to start writing.
-  ///
-  /// This function reads the data from the 'mdat' atom and writes it to
-  /// [outputFile] starting at [dataOffset]. The data is copied in chunks of
-  /// 5 MB.
-  ///
-  /// Returns: A [Future] that completes when the data has been successfully
-  /// copied.
-  Future<void> _copyMdatData(
-    Atom mdatAtom,
-    RandomAccessFile outputFile,
-    int dataOffset,
-  ) async {
-    openRead();
-    file.setPositionSync(mdatAtom.offset + 8);
-    outputFile.setPositionSync(dataOffset);
-
-    final bufferSize = 5 * 1024 * 1024; // 5 MB buffer
-    int remaining = mdatAtom.size - 8;
-
-    while (remaining > 0) {
-      final chunkSize = remaining > bufferSize ? bufferSize : remaining;
-      final chunk = file.readSync(chunkSize);
-      outputFile.writeFromSync(chunk);
-      remaining -= chunkSize;
-    }
-
-    close();
-  }
-
-  /// Encodes a metadata atom for the given key and value into an [Atom] object.
-  ///
-  /// The function searches for the value associated with the given key in the
-  /// metadata map and encodes it into an atom. If the value is not found, it
-  /// returns `null`.
-  ///
-  /// Parameters:
-  /// - key: The key of the metadata value to encode.
-  /// - value: The value of the metadata to encode.
-  ///
-  /// Returns:
-  /// - An [Atom] object representing the encoded metadata atom, or `null` if
-  ///   the value is not found.
-  Atom? encodeMetadataAtom(String key, dynamic value) {
-    final atomName = _friendlyToAtomNames[key] ?? key;
-
-    final newAtom = Atom(atomName, 0, 0);
-    final dataAtom = Atom('data', 0, 8);
-
-    final encodedValue = _encodeMetadataValue(value);
-    dataAtom.data = Uint8List.fromList(
-      [0, 0, 0, 1, 0, 0, 0, 0, ...encodedValue],
-    );
-    dataAtom.size = dataAtom.data!.length + 8;
-
-    newAtom.children.add(dataAtom);
-    newAtom.size = dataAtom.size + 8;
-
-    return newAtom;
-  }
-
-  /// Encodes a metadata atom for the given key and returns it as an [Atom] object.
-  ///
-  /// This function searches for the value associated with the given key in the metadata map
-  /// and encodes it into an atom. If the value is not found, it returns `null`.
-  ///
-  /// Parameters:
-  /// - key: The key of the metadata value to encode.
-  ///
-  /// Returns:
-  /// - An [Atom] object representing the encoded metadata value, or `null` if the value is not found.
-  Atom? reencodeMetadataAtom(String key) {
-    final atomName = _friendlyToAtomNames[key] ?? key;
-    final value = getMetadata(key);
-    if (value == null) return null;
-
-    final newAtom = Atom(atomName, 0, 0);
-    final dataAtom = Atom('data', 0, 8);
-
-    final encodedValue = _encodeMetadataValue(value);
-    dataAtom.data = Uint8List.fromList(
-      [0, 0, 0, 1, 0, 0, 0, 0, ...encodedValue],
-    );
-    dataAtom.size = dataAtom.data!.length + 8;
-
-    newAtom.children.add(dataAtom);
-    newAtom.size = dataAtom.size + 8;
-
-    return newAtom;
-  }
-
-  /// Encodes the given metadata value into a byte list.
-  ///
-  /// This function supports encoding metadata values of type String, int, bool, and `List<int>` with a length of 2.
-  ///
-  /// Parameters:
-  /// - value: The metadata value to encode.
-  ///
-  /// Returns:
-  /// - A Uint8List containing the encoded metadata value.
-  ///
-  /// Throws:
-  /// - MP4Exception if the given value is of an unsupported type.
-  Uint8List _encodeMetadataValue(dynamic value) {
-    if (value is String) {
-      return Uint8List.fromList(utf8.encode(value));
-    } else if (value is int) {
-      return intToBytes(value, 4);
-    } else if (value is bool) {
-      return Uint8List.fromList([value ? 1 : 0]);
-    } else if (value is List<int> && value.length == 2) {
-      // For numeric pairs like track number or disk number
-      return Uint8List.fromList(
-          [0, 0, ...value.expand((i) => intToBytes(i, 2))]);
-    } else {
+    if (moved && topLevel.any((a) => a.type == 'moof' || a.type == 'sidx')) {
       throw MP4Exception(
-        'Unsupported metadata value type: ${value.runtimeType}',
+        'Fragmented MP4 files cannot be rewritten: their offsets would change',
       );
     }
+
+    final input = File(file.path).openSync(mode: FileMode.read);
+    final output = File(outputPath).openSync(mode: FileMode.write);
+    try {
+      for (final atom in topLevel) {
+        _writeAtom(atom, input, output, moved ? moves : null);
+        final expectedEnd = newOffsets[atom]! + atom.size;
+        if (output.positionSync() != expectedEnd) {
+          throw MP4Exception(
+            'Wrote the wrong number of bytes for ${atom.type}: '
+            'ended at ${output.positionSync()}, expected $expectedEnd',
+          );
+        }
+      }
+    } finally {
+      input.closeSync();
+      output.closeSync();
+    }
   }
 
+  void _writeAtom(
+    Atom atom,
+    RandomAccessFile input,
+    RandomAccessFile output,
+    List<({int start, int end, int newStart})>? moves,
+  ) {
+    output.writeFromSync(_atomHeader(atom));
+
+    if (atom.type == 'mdat' && atom.data == null && atom.children.isEmpty) {
+      _copyRange(
+        input,
+        atom.sourceOffset + atom.headerSize,
+        atom.size - atom.headerSize,
+        output,
+      );
+    } else if (atom.type == 'meta') {
+      // The version and flags that come before the children of a 'meta' atom.
+      final flags = atom.data;
+      output.writeFromSync(
+        flags != null && flags.length == 4 ? flags : Uint8List(4),
+      );
+      for (final child in atom.children) {
+        _writeAtom(child, input, output, moves);
+      }
+    } else if (atom.data != null) {
+      // 'trak' atoms are kept as raw data, which includes their chunk offsets.
+      output.writeFromSync(
+        atom.type == 'trak' && moves != null
+            ? _patchChunkOffsets(atom.data!, moves)
+            : atom.data!,
+      );
+    } else {
+      for (final child in atom.children) {
+        _writeAtom(child, input, output, moves);
+      }
+    }
+  }
+
+  Uint8List _atomHeader(Atom atom) {
+    final type = latin1.encode(atom.type);
+    if (type.length != 4) {
+      throw MP4Exception('Invalid atom type: ${atom.type}');
+    }
+
+    if (atom.headerSize == 16) {
+      final header = ByteData(16)
+        ..setUint32(0, 1)
+        ..setUint64(8, atom.size);
+      header.buffer.asUint8List().setRange(4, 8, type);
+      return header.buffer.asUint8List();
+    }
+
+    if (atom.size > 0xFFFFFFFF) {
+      throw MP4Exception('Atom ${atom.type} is too large for a 32-bit size');
+    }
+    final header = ByteData(8)..setUint32(0, atom.size);
+    header.buffer.asUint8List().setRange(4, 8, type);
+    return header.buffer.asUint8List();
+  }
+
+  void _copyRange(
+    RandomAccessFile input,
+    int start,
+    int length,
+    RandomAccessFile output,
+  ) {
+    input.setPositionSync(start);
+    final buffer = Uint8List(1024 * 1024);
+    var remaining = length;
+    while (remaining > 0) {
+      final read = input.readIntoSync(
+        buffer,
+        0,
+        remaining < buffer.length ? remaining : buffer.length,
+      );
+      if (read == 0) {
+        throw MP4Exception('Unexpected end of file while copying media data');
+      }
+      output.writeFromSync(buffer, 0, read);
+      remaining -= read;
+    }
+  }
+
+  /// Returns a copy of the 'trak' payload [trak] with every chunk offset in
+  /// its `stco` and `co64` atoms moved along with the `mdat` it points into.
+  Uint8List _patchChunkOffsets(
+    Uint8List trak,
+    List<({int start, int end, int newStart})> moves,
+  ) {
+    final patched = Uint8List.fromList(trak);
+    final view = ByteData.sublistView(patched);
+
+    int remap(int offset) {
+      for (final move in moves) {
+        if (offset >= move.start && offset < move.end) {
+          return offset - move.start + move.newStart;
+        }
+      }
+      logger.w('Chunk offset $offset is not inside any mdat atom');
+      return offset;
+    }
+
+    void walk(int start, int end) {
+      var position = start;
+      while (position + 8 <= end) {
+        var size = view.getUint32(position);
+        final type = latin1.decode(patched.sublist(position + 4, position + 8));
+        var headerSize = 8;
+        if (size == 1) {
+          if (position + 16 > end) return;
+          size = view.getUint64(position + 8);
+          headerSize = 16;
+        } else if (size == 0) {
+          size = end - position;
+        }
+        if (size < headerSize || position + size > end) return;
+
+        final bodyStart = position + headerSize;
+        final boxEnd = position + size;
+        switch (type) {
+          case 'mdia':
+          case 'minf':
+          case 'stbl':
+            walk(bodyStart, boxEnd);
+            break;
+          case 'stco':
+          case 'co64':
+            final wide = type == 'co64';
+            final width = wide ? 8 : 4;
+            // Version and flags, then the entry count, then the entries.
+            final count = view.getUint32(bodyStart + 4);
+            final entries = bodyStart + 8;
+            if (entries + count * width > boxEnd) return;
+            for (var i = 0; i < count; i++) {
+              final at = entries + i * width;
+              final old = wide ? view.getUint64(at) : view.getUint32(at);
+              final moved = remap(old);
+              if (wide) {
+                view.setUint64(at, moved);
+              } else if (moved > 0xFFFFFFFF) {
+                throw MP4Exception(
+                  'Chunk offset $moved does not fit in a stco atom',
+                );
+              } else {
+                view.setUint32(at, moved);
+              }
+            }
+            break;
+        }
+        position += size;
+      }
+    }
+
+    walk(0, patched.length);
+    return patched;
+  }
+
+  /// Atoms whose value is a number, as opposed to text.
+  static const Set<String> _numericAtoms = {
+    'trkn',
+    'disk',
+    'tmpo',
+    'rtng',
+    '©mvc',
+    '©mvi',
+    'cpil',
+    'pgap',
+  };
+
+  /// Encodes the given metadata [value] into an `ilst` item atom for [key].
+  ///
+  /// Throws an [MP4Exception] if the atom name is not four bytes long or the
+  /// value cannot be stored in that atom.
+  Atom? encodeMetadataAtom(String key, dynamic value) {
+    final atomName = _friendlyToAtomNames[key] ?? key;
+    if (atomName.length != 4 || atomName.codeUnits.any((c) => c > 0xFF)) {
+      throw MP4Exception('Not a valid atom name: $atomName (from key: $key)');
+    }
+
+    final encoded = _encodeMetadataValue(atomName, value);
+    final dataAtom = Atom(
+      'data',
+      0,
+      8,
+      // Version 0 and the data type as flags, then a zero locale.
+      data: Uint8List.fromList([0, 0, 0, encoded.type, 0, 0, 0, 0, ...encoded.bytes]),
+    )..updateSize();
+
+    final newAtom = Atom(atomName, 0, 0)..children.add(dataAtom);
+    newAtom.updateSize();
+    return newAtom;
+  }
+
+  /// Re-encodes the current value of [key].
+  Atom? reencodeMetadataAtom(String key) {
+    final value = getMetadata(key);
+    if (value == null) return null;
+    return encodeMetadataAtom(key, value);
+  }
+
+  /// Encodes [value] for the atom [atomName]: the `data` atom type and its bytes.
+  ({int type, Uint8List bytes}) _encodeMetadataValue(
+    String atomName,
+    dynamic value,
+  ) {
+    switch (atomName) {
+      case 'trkn':
+      case 'disk':
+        final pair = value is int ? [value, 0] : value;
+        if (pair is! List<int> ||
+            pair.length != 2 ||
+            pair.any((n) => n < 0 || n > 0xFFFF)) {
+          throw MP4Exception(
+            '$atomName needs a number or a [number, total] pair of 16-bit '
+            'values, got: $value',
+          );
+        }
+        // Two reserved bytes, the number, the total and (for tracks) two more
+        // reserved bytes.
+        final bytes = ByteData(atomName == 'trkn' ? 8 : 6)
+          ..setUint16(2, pair[0])
+          ..setUint16(4, pair[1]);
+        return (type: 0, bytes: bytes.buffer.asUint8List());
+
+      case 'covr':
+        if (value is! Uint8List) {
+          throw MP4Exception('covr needs image bytes, got: ${value.runtimeType}');
+        }
+        return (type: _imageDataType(value), bytes: value);
+
+      case 'tmpo':
+        return _encodeInteger(atomName, value, 2);
+
+      case 'rtng':
+      case '©mvc':
+      case '©mvi':
+      case 'cpil':
+      case 'pgap':
+        return _encodeInteger(atomName, value, 1);
+    }
+
+    if (value is String) {
+      return (type: 1, bytes: Uint8List.fromList(utf8.encode(value)));
+    }
+    if (value is int && !_numericAtoms.contains(atomName)) {
+      // For example a year given as 1999 rather than '1999'.
+      return (type: 1, bytes: Uint8List.fromList(utf8.encode('$value')));
+    }
+    throw MP4Exception(
+      'Unsupported metadata value type: ${value.runtimeType} for $atomName',
+    );
+  }
+
+  /// Encodes a signed big-endian integer, in at least [minWidth] bytes.
+  ({int type, Uint8List bytes}) _encodeInteger(
+    String atomName,
+    dynamic value,
+    int minWidth,
+  ) {
+    final number = value is bool ? (value ? 1 : 0) : value;
+    if (number is! int) {
+      throw MP4Exception('$atomName needs a number, got: ${value.runtimeType}');
+    }
+
+    for (final width in [1, 2, 4, 8]) {
+      if (width < minWidth) continue;
+      final limit = width == 8 ? null : 1 << (width * 8 - 1);
+      if (limit != null && (number < -limit || number >= limit)) continue;
+
+      final bytes = ByteData(width);
+      switch (width) {
+        case 1:
+          bytes.setInt8(0, number);
+          break;
+        case 2:
+          bytes.setInt16(0, number);
+          break;
+        case 4:
+          bytes.setInt32(0, number);
+          break;
+        default:
+          bytes.setInt64(0, number);
+      }
+      return (type: 21, bytes: bytes.buffer.asUint8List());
+    }
+    throw MP4Exception('Number does not fit in $atomName: $number');
+  }
+
+  /// The `data` atom type for image bytes: 13 JPEG, 14 PNG, 12 GIF, 27 BMP.
+  int _imageDataType(Uint8List image) {
+    if (image.length > 3) {
+      if (image[0] == 0x89 && image[1] == 0x50) return 14;
+      if (image[0] == 0x47 && image[1] == 0x49 && image[2] == 0x46) return 12;
+      if (image[0] == 0x42 && image[1] == 0x4D) return 27;
+    }
+    return 13;
+  }
+
+  /// Applies the queued operations and rewrites the file.
+  ///
+  /// Setting a key replaces every item with that atom name, and removing a
+  /// key removes them all. Missing `udta`, `meta` and `ilst` atoms are
+  /// created. The file is only replaced once the new one has been written
+  /// completely, so a failure leaves the original untouched.
+  ///
+  /// Throws an [MP4Exception] if a value cannot be encoded or the file cannot
+  /// be written.
   @override
   Future<void> applyMetadataChanges() async {
     if (pendingOperations.isEmpty) {
@@ -967,174 +1152,106 @@ class MP4Handler extends CodecHandler {
       return;
     }
 
-    Atom? ilstAtom = findAtomByPath(['moov', 'udta', 'meta', 'ilst']);
-    if (ilstAtom == null) {
-      throw MP4Exception('ilst atom not found');
+    final moov = _findAtom(_root, 'moov');
+    if (moov == null) {
+      throw MP4Exception('moov atom not found');
     }
 
-    for (var operation in pendingOperations) {
+    // Work on a copy of the items so that a bad value changes nothing.
+    final existingIlst = findAtomByPath(['moov', 'udta', 'meta', 'ilst']);
+    final items = List<Atom>.of(existingIlst?.children ?? []);
+    for (final operation in pendingOperations) {
       switch (operation.type) {
         case OperationType.add:
         case OperationType.update:
-          _addOrUpdateMetadata(ilstAtom, operation.key, operation.value);
+          _addOrUpdateItem(items, operation.key, operation.value);
           break;
         case OperationType.remove:
-          _removeMetadata(ilstAtom, operation.key);
+          final atomName = _friendlyToAtomNames[operation.key] ?? operation.key;
+          items.removeWhere((atom) => atom.type == atomName);
           break;
       }
     }
 
-    _sortIlstAtoms(ilstAtom);
-    updateTreeSizes();
-    updateTreeOffsets();
-
+    final undo = <void Function()>[];
     try {
-      await _safeWriteUpdatedAtoms();
-      pendingOperations.clear();
-      _setup(); // Reopen the file and rebuild the atom tree
+      final ilst = existingIlst ?? _createIlst(moov, undo);
+      final previous = ilst.children;
+      ilst.children = items;
+      undo.add(() => ilst.children = previous);
+
+      updateTreeSizes();
+      _safeWrite();
     } catch (e) {
+      for (final step in undo.reversed) {
+        step();
+      }
+      updateTreeSizes();
       throw MP4Exception('Failed to apply metadata changes: $e');
     }
+
+    pendingOperations.clear();
+    _setup(); // Reopen the file and rebuild the atom tree
   }
 
-  /// Adds or updates metadata in the given [ilstAtom] based on the given [key] and [value].
-  ///
-  /// This function first encodes the given [value] into an atom using the [encodeMetadataAtom] method.
-  /// If the encoding is successful, it then searches for an existing atom in the [ilstAtom] with a type
-  /// that matches the [atomName] derived from the [key]. If an existing atom is found, it updates
-  /// the atom with the encoded metadata atom. If no existing atom is found, it adds the encoded
-  /// metadata atom to the children of the [ilstAtom].
-  ///
-  /// If the encoding fails (i.e., the [encodedAtom] is null), it throws an [MP4Exception] with a
-  /// message indicating the failure.
-  ///
-  /// Parameters:
-  /// - [ilstAtom]: The atom from which to add or update metadata.
-  /// - [key]: The key of the metadata to add or update. The [atomName] is derived from this key.
-  /// - [value]: The value of the metadata to add or update.
-  ///
-  /// Throws:
-  /// - [MP4Exception] if the encoding of metadata fails.
-  void _addOrUpdateMetadata(
-    Atom ilstAtom,
-    String key,
-    dynamic value,
-  ) {
-    final atomName = _friendlyToAtomNames[key] ?? key;
+  void _addOrUpdateItem(List<Atom> items, String key, dynamic value) {
     final encodedAtom = encodeMetadataAtom(key, value);
-
     if (encodedAtom == null) {
       throw MP4Exception('Failed to encode metadata for key: $key');
     }
 
-    Atom? existingAtom = _findAtom(ilstAtom, atomName);
-    if (existingAtom != null) {
-      int index = ilstAtom.children.indexOf(existingAtom);
-      ilstAtom.children[index] = encodedAtom;
-    } else {
-      ilstAtom.children.add(encodedAtom);
+    final index = items.indexWhere((atom) => atom.type == encodedAtom.type);
+    items.removeWhere((atom) => atom.type == encodedAtom.type);
+    // Keep the item where it was so the order of the other items is stable.
+    items.insert(index == -1 ? items.length : index, encodedAtom);
+  }
+
+  /// Creates the missing atoms on the path moov/udta/meta/ilst and returns
+  /// the `ilst` atom. Each step adds a function to [undo].
+  Atom _createIlst(Atom moov, List<void Function()> undo) {
+    Atom add(Atom parent, Atom child) {
+      parent.children.add(child);
+      undo.add(() => parent.children.removeWhere((a) => identical(a, child)));
+      return child;
     }
-  }
 
-  /// Removes metadata from the given [ilstAtom] based on the given [key].
-  ///
-  /// The function looks for an atom in the [ilstAtom] children with a type that matches the
-  /// [atomName] derived from the [key]. If such an atom is found, it is removed from the children.
-  ///
-  /// Parameters:
-  /// - [ilstAtom]: The atom from which to remove metadata.
-  /// - [key]: The key of the metadata to remove. The [atomName] is derived from this key.
-  void _removeMetadata(Atom ilstAtom, String key) {
-    final atomName = _friendlyToAtomNames[key] ?? key;
-    ilstAtom.children.removeWhere((atom) => atom.type == atomName);
-  }
-
-  /// Writes the updated atoms to a temporary file, creates a backup of the original file,
-  /// replaces the original file with the temporary file, and cleans up temporary files.
-  ///
-  /// This function is responsible for ensuring that the MP4 file is updated correctly and safely.
-  /// It creates a temporary file, writes the updated atoms to it, creates a backup of the original file,
-  /// replaces the original file with the temporary file, and cleans up temporary files.
-  ///
-  /// If an error occurs during the file write process, the function restores the backup file,
-  /// deletes the temporary files, and throws an [MP4Exception].
-  ///
-  /// Parameters:
-  /// - None.
-  ///
-  /// Returns:
-  /// - A [Future] that completes when the file write process is finished.
-  ///
-  /// Throws:
-  /// - An [MP4Exception] if an error occurs during the file write process.
-  Future<void> _safeWriteUpdatedAtoms() async {
-    final tempDir = await Directory.systemTemp.createTemp('mp4_update_');
-    final tempFile = File('${tempDir.path}/temp_mp4');
-    final backupFile = File('${file.path}.bak');
-
-    try {
-      // Write to temporary file
-      final tempRAF = await tempFile.open(mode: FileMode.write);
-      await _writeAtomRecursive(_root, tempRAF, 0);
-      await tempRAF.close();
-
-      // Create a backup of the original file
-      await File(file.path).copy(backupFile.path);
-
-      // Replace the original file with the temporary file
-      await tempFile.copy(file.path);
-
-      // If everything succeeded, delete the backup and temp files
-      await backupFile.delete();
-      await tempFile.delete();
-      await tempDir.delete();
-    } catch (e) {
-      logger.e('Error during file write: $e');
-
-      // If backup exists, restore it
-      if (await backupFile.exists()) {
-        await backupFile.copy(file.path);
-        await backupFile.delete();
-      }
-
-      // Clean up temp files
-      if (await tempFile.exists()) await tempFile.delete();
-      if (await tempDir.exists()) await tempDir.delete();
-
-      throw MP4Exception(
-        'Failed to write updated atoms: $e',
+    final udta = _findAtom(moov, 'udta') ?? add(moov, Atom('udta', 0, 0));
+    var meta = _findAtom(udta, 'meta');
+    if (meta == null) {
+      meta = add(udta, Atom('meta', 0, 0, data: Uint8List(4)));
+      add(
+        meta,
+        Atom(
+          'hdlr',
+          0,
+          0,
+          data: Uint8List.fromList([
+            0, 0, 0, 0, // version and flags
+            0, 0, 0, 0, // pre-defined
+            ...latin1.encode('mdir'), // handler type: metadata
+            ...latin1.encode('appl'), // manufacturer
+            0, 0, 0, 0, 0, 0, 0, 0, // reserved
+            0, // empty name
+          ]),
+        ),
       );
     }
+    return add(meta, Atom('ilst', 0, 0));
   }
 
-  /// Sorts the children of the given [ilstAtom] based on a preferred order.
-  ///
-  /// The preferred order is defined by the [_friendlyToAtomNames] map, which maps friendly names
-  /// of metadata keys to their corresponding atom types. The function sorts the children of the
-  /// [ilstAtom] based on the index of each child's type in the preferred order list.
-  ///
-  /// If a child's type is not found in the preferred order list, it is placed at the end of the sorted list.
-  ///
-  /// Parameters:
-  /// - [ilstAtom]: The atom whose children need to be sorted.
-  void _sortIlstAtoms(Atom ilstAtom) {
-    // Define the preferred order of atoms
-    final preferredOrder = _friendlyToAtomNames.values.toList();
-
-    ilstAtom.children.sort((a, b) {
-      int indexA = preferredOrder.indexOf(a.type);
-      int indexB = preferredOrder.indexOf(b.type);
-
-      if (indexA == -1 && indexB == -1) {
-        return a.type.compareTo(b.type); // Alphabetical order for unknown atoms
-      } else if (indexA == -1) {
-        return 1; // Unknown atoms go to the end
-      } else if (indexB == -1) {
-        return -1; // Unknown atoms go to the end
-      } else {
-        return indexA.compareTo(indexB);
-      }
-    });
+  /// Writes the updated file next to the original and renames it over the
+  /// original, so the original is never half-written.
+  void _safeWrite() {
+    final path = file.path;
+    final tempFile = File('$path.tmp');
+    try {
+      _writeTree(tempFile.path);
+      tempFile.renameSync(path);
+    } catch (e) {
+      logger.e('Error during file write: $e');
+      if (tempFile.existsSync()) tempFile.deleteSync();
+      rethrow;
+    }
   }
 
   /// Finds an atom in the MP4 file tree based on the given type.
