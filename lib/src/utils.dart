@@ -28,8 +28,6 @@ String formatDuration(Duration duration) {
   }
 }
 
-
-
 extension Uint8Utils on Uint8List {
   bool equals(Uint8List other) {
     return ListEquality<int>().equals(other, this);

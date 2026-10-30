@@ -1,3 +1,5 @@
+[![CI](https://github.com/blackmonk13/mpeg_codec/actions/workflows/ci.yml/badge.svg)](https://github.com/blackmonk13/mpeg_codec/actions/workflows/ci.yml)
+
 
 A package for handling MP4 and ID3 metadata and related operations.
 

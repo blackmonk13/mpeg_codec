@@ -7,42 +7,40 @@ import 'package:mpeg_codec/mpeg_codec.dart';
 import 'package:test/test.dart';
 
 List<int> uint32(int value) => [
-      (value >> 24) & 0xFF,
-      (value >> 16) & 0xFF,
-      (value >> 8) & 0xFF,
-      value & 0xFF,
-    ];
+  (value >> 24) & 0xFF,
+  (value >> 16) & 0xFF,
+  (value >> 8) & 0xFF,
+  value & 0xFF,
+];
 
 List<int> box(String type, List<int> payload) => [
-      ...uint32(8 + payload.length),
-      ...latin1.encode(type),
-      ...payload,
-    ];
+  ...uint32(8 + payload.length),
+  ...latin1.encode(type),
+  ...payload,
+];
 
 /// A box with a 64-bit size.
 List<int> largeBox(String type, List<int> payload) => [
-      ...uint32(1),
-      ...latin1.encode(type),
-      ...uint32(0),
-      ...uint32(16 + payload.length),
-      ...payload,
-    ];
+  ...uint32(1),
+  ...latin1.encode(type),
+  ...uint32(0),
+  ...uint32(16 + payload.length),
+  ...payload,
+];
 
 /// An `ilst` item holding one `data` atom of the given type.
-List<int> item(String name, int dataType, List<int> value) => box(
-      name,
-      box('data', [0, 0, 0, dataType, 0, 0, 0, 0, ...value]),
-    );
+List<int> item(String name, int dataType, List<int> value) =>
+    box(name, box('data', [0, 0, 0, dataType, 0, 0, 0, 0, ...value]));
 
 List<int> textItem(String name, String text) =>
     item(name, 1, utf8.encode(text));
 
 /// A freeform ('----') item, as iTunes writes for custom tags.
 List<int> freeformItem(String mean, String name, String value) => box('----', [
-      ...box('mean', [0, 0, 0, 0, ...utf8.encode(mean)]),
-      ...box('name', [0, 0, 0, 0, ...utf8.encode(name)]),
-      ...box('data', [0, 0, 0, 1, 0, 0, 0, 0, ...utf8.encode(value)]),
-    ]);
+  ...box('mean', [0, 0, 0, 0, ...utf8.encode(mean)]),
+  ...box('name', [0, 0, 0, 0, ...utf8.encode(name)]),
+  ...box('data', [0, 0, 0, 1, 0, 0, 0, 0, ...utf8.encode(value)]),
+]);
 
 const chunkLength = 1000;
 
@@ -95,10 +93,13 @@ List<int> moovBox({
 }
 
 List<int> ftypBox() => box('ftyp', [
-      ...latin1.encode('M4A '),
-      0, 0, 0, 0,
-      ...latin1.encode('M4A mp42isom'),
-    ]);
+  ...latin1.encode('M4A '),
+  0,
+  0,
+  0,
+  0,
+  ...latin1.encode('M4A mp42isom'),
+]);
 
 /// Builds an m4a file. With [moovFirst] the layout is ftyp, moov, free, mdat
 /// (like most iTunes files), otherwise ftyp, mdat, moov.
@@ -118,20 +119,17 @@ Uint8List buildM4a({
   final mdat = largeMdat ? largeBox('mdat', media) : box('mdat', media);
 
   List<int> moov(int mediaStart) => moovBox(
-        chunkOffsets: [for (var i = 0; i < 3; i++) mediaStart + i * chunkLength],
-        ilstItems: ilstItems,
-        withUdta: withUdta,
-        udtaTrailer: udtaTrailer,
-        metaTrailer: metaTrailer,
-      );
+    chunkOffsets: [for (var i = 0; i < 3; i++) mediaStart + i * chunkLength],
+    ilstItems: ilstItems,
+    withUdta: withUdta,
+    udtaTrailer: udtaTrailer,
+    metaTrailer: metaTrailer,
+  );
 
   if (moovFirst) {
     final moovLength = moov(0).length;
-    final start = ftyp.length +
-        moovLength +
-        extraBoxes.length +
-        free.length +
-        mdatHeader;
+    final start =
+        ftyp.length + moovLength + extraBoxes.length + free.length + mdatHeader;
     return Uint8List.fromList([
       ...ftyp,
       ...moov(start),
@@ -143,9 +141,7 @@ Uint8List buildM4a({
   }
 
   final start = ftyp.length + mdatHeader;
-  return Uint8List.fromList(
-    [...ftyp, ...mdat, ...moov(start), ...fileTrailer],
-  );
+  return Uint8List.fromList([...ftyp, ...mdat, ...moov(start), ...fileTrailer]);
 }
 
 /// A fragmented file: ftyp, sidx, moov, moof, mdat, mfra. The offsets that
@@ -163,11 +159,14 @@ Uint8List buildFragmented({required List<int> ilstItems}) {
 
   final moof = box('moof', [
     ...box('mfhd', [0, 0, 0, 0, 0, 0, 0, 1]),
-    ...box('traf', box('tfhd', [
-      0, 0, 0, 1, // version, flags: has a base data offset
-      ...uint32(1), // track ID
-      ...uint32(0), ...uint32(moofStart), // base data offset
-    ])),
+    ...box(
+      'traf',
+      box('tfhd', [
+        0, 0, 0, 1, // version, flags: has a base data offset
+        ...uint32(1), // track ID
+        ...uint32(0), ...uint32(moofStart), // base data offset
+      ]),
+    ),
   ]);
   final mdatStart = moofStart + moof.length + 8;
 
@@ -268,15 +267,23 @@ List<String> topLevelTypes(Uint8List bytes) {
     types.add(latin1.decode(bytes.sublist(position + 4, position + 8)));
     position += size;
   }
-  expect(position, bytes.length, reason: 'top-level boxes do not fill the file');
+  expect(
+    position,
+    bytes.length,
+    reason: 'top-level boxes do not fill the file',
+  );
   return types;
 }
 
 List<int> chunkOffsetsOf(Uint8List bytes) {
-  final stco = findBox(
-    bytes,
-    ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stco'],
-  )!;
+  final stco = findBox(bytes, [
+    'moov',
+    'trak',
+    'mdia',
+    'minf',
+    'stbl',
+    'stco',
+  ])!;
   final view = ByteData.sublistView(bytes);
   final count = view.getUint32(stco.start + 4);
   return [
@@ -387,33 +394,37 @@ void main() {
   });
 
   group('without blocking', () {
-    test('readMetadata gives what the handler has, read in another isolate',
-        () async {
-      final file = writeFile(buildM4a(ilstItems: tagged));
+    test(
+      'readMetadata gives what the handler has, read in another isolate',
+      () async {
+        final file = writeFile(buildM4a(ilstItems: tagged));
 
-      final metadata = await MP4Handler.readMetadata(file.path);
+        final metadata = await MP4Handler.readMetadata(file.path);
 
-      expect(metadata.asMap(), MP4Handler(file.path).metadata.asMap());
-      expect(metadata.get<String>('title'), 'Old title');
-    });
+        expect(metadata.asMap(), MP4Handler(file.path).metadata.asMap());
+        expect(metadata.get<String>('title'), 'Old title');
+      },
+    );
 
-    test('operations queued while the file is being written stay queued',
-        () async {
-      final file = writeFile(buildM4a(ilstItems: tagged));
+    test(
+      'operations queued while the file is being written stay queued',
+      () async {
+        final file = writeFile(buildM4a(ilstItems: tagged));
 
-      final handler = MP4Handler(file.path);
-      handler.updateMetadata({'title': 'x' * 100});
-      final applying = handler.applyMetadataChanges(inPlace: false);
-      handler.updateMetadata({'album': 'Queued meanwhile'});
-      await applying;
+        final handler = MP4Handler(file.path);
+        handler.updateMetadata({'title': 'x' * 100});
+        final applying = handler.applyMetadataChanges(inPlace: false);
+        handler.updateMetadata({'album': 'Queued meanwhile'});
+        await applying;
 
-      expect(handler.pendingOperations, hasLength(1));
-      await handler.applyMetadataChanges();
-      final reread = MP4Handler(file.path);
-      expect(reread.getMetadata<String>('album'), 'Queued meanwhile');
-      expect(reread.getMetadata<String>('title'), 'x' * 100);
-      expectChunksIntact(file.readAsBytesSync());
-    });
+        expect(handler.pendingOperations, hasLength(1));
+        await handler.applyMetadataChanges();
+        final reread = MP4Handler(file.path);
+        expect(reread.getMetadata<String>('album'), 'Queued meanwhile');
+        expect(reread.getMetadata<String>('title'), 'x' * 100);
+        expectChunksIntact(file.readAsBytesSync());
+      },
+    );
   });
 
   group('in place', () {
@@ -435,10 +446,7 @@ void main() {
       expect(bytes.sublist(mdat.start, mdat.end), media);
       expect(chunkOffsetsOf(bytes), chunkOffsetsOf(before));
       expectChunksIntact(bytes);
-      expect(
-        MP4Handler(file.path).getMetadata<String>('title'),
-        'Old title!',
-      );
+      expect(MP4Handler(file.path).getMetadata<String>('title'), 'Old title!');
       expect(File('${file.path}.tmp').existsSync(), isFalse);
     });
 
@@ -471,64 +479,76 @@ void main() {
       expect(inPlace.readAsBytesSync(), copied.readAsBytesSync());
     });
 
-    test('a change that does not fit moves the media and leaves padding',
-        () async {
-      final file = writeFile(buildM4a(ilstItems: tagged));
+    test(
+      'a change that does not fit moves the media and leaves padding',
+      () async {
+        final file = writeFile(buildM4a(ilstItems: tagged));
 
-      final handler = MP4Handler(file.path);
-      handler.updateMetadata({'title': longTitle});
-      await handler.applyMetadataChanges();
+        final handler = MP4Handler(file.path);
+        handler.updateMetadata({'title': longTitle});
+        await handler.applyMetadataChanges();
 
-      final first = file.readAsBytesSync();
-      expect(topLevelTypes(first), ['ftyp', 'moov', 'free', 'mdat']);
-      expectChunksIntact(first);
-      final free = boxStarts(first)['free']!;
-      expect(ByteData.sublistView(first).getUint32(free), MP4Handler.freePadding);
+        final first = file.readAsBytesSync();
+        expect(topLevelTypes(first), ['ftyp', 'moov', 'free', 'mdat']);
+        expectChunksIntact(first);
+        final free = boxStarts(first)['free']!;
+        expect(
+          ByteData.sublistView(first).getUint32(free),
+          MP4Handler.freePadding,
+        );
 
-      // A second, small edit now fits, so nothing moves.
-      final second = MP4Handler(file.path);
-      second.updateMetadata({'album': 'Another album name'});
-      await second.applyMetadataChanges();
+        // A second, small edit now fits, so nothing moves.
+        final second = MP4Handler(file.path);
+        second.updateMetadata({'album': 'Another album name'});
+        await second.applyMetadataChanges();
 
-      final again = file.readAsBytesSync();
-      expect(again.length, first.length);
-      expect(chunkOffsetsOf(again), chunkOffsetsOf(first));
-      expectChunksIntact(again);
-      expect(
-        MP4Handler(file.path).getMetadata<String>('album'),
-        'Another album name',
-      );
-    });
+        final again = file.readAsBytesSync();
+        expect(again.length, first.length);
+        expect(chunkOffsetsOf(again), chunkOffsetsOf(first));
+        expectChunksIntact(again);
+        expect(
+          MP4Handler(file.path).getMetadata<String>('album'),
+          'Another album name',
+        );
+      },
+    );
 
-    test('a free atom inside meta takes the change, so moov keeps its size',
-        () async {
-      final file = writeFile(
-        buildM4a(ilstItems: tagged, metaTrailer: box('free', List.filled(92, 0))),
-      );
-      final before = file.readAsBytesSync();
-      final moovBefore = ByteData.sublistView(before).getUint32(boxStarts(before)['moov']!);
+    test(
+      'a free atom inside meta takes the change, so moov keeps its size',
+      () async {
+        final file = writeFile(
+          buildM4a(
+            ilstItems: tagged,
+            metaTrailer: box('free', List.filled(92, 0)),
+          ),
+        );
+        final before = file.readAsBytesSync();
+        final moovBefore = ByteData.sublistView(
+          before,
+        ).getUint32(boxStarts(before)['moov']!);
 
-      final handler = MP4Handler(file.path);
-      handler.updateMetadata({'title': longTitle});
-      await handler.applyMetadataChanges();
+        final handler = MP4Handler(file.path);
+        handler.updateMetadata({'title': longTitle});
+        await handler.applyMetadataChanges();
 
-      final bytes = file.readAsBytesSync();
-      expect(bytes.length, before.length);
-      expect(
-        ByteData.sublistView(bytes).getUint32(boxStarts(bytes)['moov']!),
-        moovBefore,
-      );
-      expect(chunkOffsetsOf(bytes), chunkOffsetsOf(before));
-      expectChunksIntact(bytes);
-      expect(MP4Handler(file.path).getMetadata<String>('title'), longTitle);
+        final bytes = file.readAsBytesSync();
+        expect(bytes.length, before.length);
+        expect(
+          ByteData.sublistView(bytes).getUint32(boxStarts(bytes)['moov']!),
+          moovBefore,
+        );
+        expect(chunkOffsetsOf(bytes), chunkOffsetsOf(before));
+        expectChunksIntact(bytes);
+        expect(MP4Handler(file.path).getMetadata<String>('title'), longTitle);
 
-      // Removing it again gives the space back to the same free atom.
-      final second = MP4Handler(file.path);
-      second.updateMetadata({'title': 'Old title'});
-      await second.applyMetadataChanges();
-      expect(file.readAsBytesSync().length, before.length);
-      expect(MP4Handler(file.path).getMetadata<String>('title'), 'Old title');
-    });
+        // Removing it again gives the space back to the same free atom.
+        final second = MP4Handler(file.path);
+        second.updateMetadata({'title': 'Old title'});
+        await second.applyMetadataChanges();
+        expect(file.readAsBytesSync().length, before.length);
+        expect(MP4Handler(file.path).getMetadata<String>('title'), 'Old title');
+      },
+    );
 
     test('moov at the end of the file grows and shrinks in place', () async {
       final original = buildM4a(moovFirst: false, ilstItems: tagged);
@@ -605,10 +625,15 @@ void main() {
       await handler.applyMetadataChanges();
 
       final bytes = file.readAsBytesSync();
-      expect(
-        topLevelTypes(bytes),
-        ['ftyp', 'sidx', 'moov', 'free', 'moof', 'mdat', 'mfra'],
-      );
+      expect(topLevelTypes(bytes), [
+        'ftyp',
+        'sidx',
+        'moov',
+        'free',
+        'moof',
+        'mdat',
+        'mfra',
+      ]);
       expect(bytes.length, greaterThan(original.length));
       expectFragmentOffsets(bytes);
       expect(MP4Handler(file.path).getMetadata<String>('title'), longTitle);
@@ -647,33 +672,37 @@ void main() {
       expect(reread.getMetadata<String>('artist'), 'Someone');
     });
 
-    test('replaces every item with the same name and keeps the order',
-        () async {
-      final file = writeFile(buildM4a(
-        ilstItems: [
-          ...textItem('©nam', 'one'),
-          ...textItem('©ART', 'artist'),
-          ...textItem('©nam', 'two'),
-          ...textItem('©alb', 'album'),
-        ],
-      ));
+    test(
+      'replaces every item with the same name and keeps the order',
+      () async {
+        final file = writeFile(
+          buildM4a(
+            ilstItems: [
+              ...textItem('©nam', 'one'),
+              ...textItem('©ART', 'artist'),
+              ...textItem('©nam', 'two'),
+              ...textItem('©alb', 'album'),
+            ],
+          ),
+        );
 
-      final handler = MP4Handler(file.path);
-      handler.updateMetadata({'title': 'only'});
-      await handler.applyMetadataChanges();
+        final handler = MP4Handler(file.path);
+        handler.updateMetadata({'title': 'only'});
+        await handler.applyMetadataChanges();
 
-      final bytes = file.readAsBytesSync();
-      final ilst = findBox(bytes, ['moov', 'udta', 'meta', 'ilst'])!;
-      final names = <String>[];
-      var position = ilst.start;
-      final view = ByteData.sublistView(bytes);
-      while (position < ilst.end) {
-        names.add(latin1.decode(bytes.sublist(position + 4, position + 8)));
-        position += view.getUint32(position);
-      }
-      expect(names, ['©nam', '©ART', '©alb']);
-      expect(MP4Handler(file.path).getMetadata<String>('title'), 'only');
-    });
+        final bytes = file.readAsBytesSync();
+        final ilst = findBox(bytes, ['moov', 'udta', 'meta', 'ilst'])!;
+        final names = <String>[];
+        var position = ilst.start;
+        final view = ByteData.sublistView(bytes);
+        while (position < ilst.end) {
+          names.add(latin1.decode(bytes.sublist(position + 4, position + 8)));
+          position += view.getUint32(position);
+        }
+        expect(names, ['©nam', '©ART', '©alb']);
+        expect(MP4Handler(file.path).getMetadata<String>('title'), 'only');
+      },
+    );
 
     test('removes a key from the file and from the metadata', () async {
       final file = writeFile(buildM4a(ilstItems: tagged));
@@ -717,10 +746,9 @@ void main() {
 
   group('bytes that are not atoms', () {
     test('keeps the zero terminator at the end of udta', () async {
-      final file = writeFile(buildM4a(
-        ilstItems: tagged,
-        udtaTrailer: [0, 0, 0, 0],
-      ));
+      final file = writeFile(
+        buildM4a(ilstItems: tagged, udtaTrailer: [0, 0, 0, 0]),
+      );
 
       final handler = MP4Handler(file.path);
       expect(handler.getMetadata<String>('title'), 'Old title');
@@ -739,10 +767,9 @@ void main() {
     });
 
     test('keeps bytes after the last atom', () async {
-      final file = writeFile(buildM4a(
-        ilstItems: tagged,
-        fileTrailer: [1, 2, 3],
-      ));
+      final file = writeFile(
+        buildM4a(ilstItems: tagged, fileTrailer: [1, 2, 3]),
+      );
 
       final handler = MP4Handler(file.path);
       handler.updateMetadata({'title': 'A much longer title than before!'});
@@ -787,7 +814,10 @@ void main() {
       final file = writeFile(buildM4a(ilstItems: custom));
 
       final handler = MP4Handler(file.path);
-      handler.addMetadata({'com.apple.iTunes.TEMPO': 'slow', 'com.example.n': 7});
+      handler.addMetadata({
+        'com.apple.iTunes.TEMPO': 'slow',
+        'com.example.n': 7,
+      });
       handler.removeMetadata(['com.apple.iTunes.SOURCE']);
       await handler.applyMetadataChanges();
 
@@ -806,7 +836,9 @@ void main() {
       final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4]);
 
       final handler = MP4Handler(file.path);
-      handler.updateMetadata({'cover': [jpeg, png]});
+      handler.updateMetadata({
+        'cover': [jpeg, png],
+      });
       await handler.applyMetadataChanges();
 
       final reread = MP4Handler(file.path);
@@ -819,34 +851,41 @@ void main() {
       expectChunksIntact(bytes);
     });
 
-    test('adding a cover keeps the covers that are there, updating replaces',
-        () async {
-      final file = writeFile(buildM4a(ilstItems: tagged));
-      final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, 5, 6, 7, 8]);
-      final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4]);
-      final gif = Uint8List.fromList([0x47, 0x49, 0x46, 0x38, 9, 9, 9, 9]);
+    test(
+      'adding a cover keeps the covers that are there, updating replaces',
+      () async {
+        final file = writeFile(buildM4a(ilstItems: tagged));
+        final jpeg = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, 5, 6, 7, 8]);
+        final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4]);
+        final gif = Uint8List.fromList([0x47, 0x49, 0x46, 0x38, 9, 9, 9, 9]);
 
-      final first = MP4Handler(file.path);
-      first.updateMetadata({'cover': jpeg});
-      await first.applyMetadataChanges();
+        final first = MP4Handler(file.path);
+        first.updateMetadata({'cover': jpeg});
+        await first.applyMetadataChanges();
 
-      final second = MP4Handler(file.path);
-      second.addMetadata({'cover': png});
-      second.addMetadata({'cover': [gif]});
-      await second.applyMetadataChanges();
+        final second = MP4Handler(file.path);
+        second.addMetadata({'cover': png});
+        second.addMetadata({
+          'cover': [gif],
+        });
+        await second.applyMetadataChanges();
 
-      expect(MP4Handler(file.path).getMetadata<List>('covers'),
-          [jpeg, png, gif]);
+        expect(MP4Handler(file.path).getMetadata<List>('covers'), [
+          jpeg,
+          png,
+          gif,
+        ]);
 
-      // The other items and the media are untouched.
-      final bytes = file.readAsBytesSync();
-      expectChunksIntact(bytes);
+        // The other items and the media are untouched.
+        final bytes = file.readAsBytesSync();
+        expectChunksIntact(bytes);
 
-      final third = MP4Handler(file.path);
-      third.updateMetadata({'cover': png});
-      await third.applyMetadataChanges();
-      expect(MP4Handler(file.path).getMetadata<List>('covers'), [png]);
-    });
+        final third = MP4Handler(file.path);
+        third.updateMetadata({'cover': png});
+        await third.applyMetadataChanges();
+        expect(MP4Handler(file.path).getMetadata<List>('covers'), [png]);
+      },
+    );
 
     test('an empty list of covers throws', () async {
       final file = writeFile(buildM4a(ilstItems: tagged));
@@ -864,9 +903,11 @@ void main() {
   group('reading', () {
     test('decodes big-endian UTF-16 text', () {
       // 'Hé日' in UTF-16BE, data type 2.
-      final file = writeFile(buildM4a(
-        ilstItems: item('©nam', 2, [0x00, 0x48, 0x00, 0xE9, 0x65, 0xE5]),
-      ));
+      final file = writeFile(
+        buildM4a(
+          ilstItems: item('©nam', 2, [0x00, 0x48, 0x00, 0xE9, 0x65, 0xE5]),
+        ),
+      );
 
       expect(MP4Handler(file.path).getMetadata<String>('title'), 'Hé日');
     });
@@ -874,12 +915,14 @@ void main() {
 
   group('values', () {
     test('reads track and disc pairs, and writes them back', () async {
-      final file = writeFile(buildM4a(
-        ilstItems: [
-          ...item('trkn', 0, [0, 0, 0, 1, 0, 9, 0, 0]),
-          ...item('disk', 0, [0, 0, 0, 2, 0, 3]),
-        ],
-      ));
+      final file = writeFile(
+        buildM4a(
+          ilstItems: [
+            ...item('trkn', 0, [0, 0, 0, 1, 0, 9, 0, 0]),
+            ...item('disk', 0, [0, 0, 0, 2, 0, 3]),
+          ],
+        ),
+      );
 
       final handler = MP4Handler(file.path);
       expect(handler.getMetadata<List<int>>('trackNumber'), [1, 9]);
@@ -992,20 +1035,22 @@ void main() {
       expectChunksIntact(file.readAsBytesSync());
     });
 
-    test('a value the atom cannot hold throws and leaves the file untouched',
-        () async {
-      final original = buildM4a(ilstItems: tagged);
-      final file = writeFile(original);
+    test(
+      'a value the atom cannot hold throws and leaves the file untouched',
+      () async {
+        final original = buildM4a(ilstItems: tagged);
+        final file = writeFile(original);
 
-      final handler = MP4Handler(file.path);
-      handler.updateMetadata({'trackNumber': 'three'});
+        final handler = MP4Handler(file.path);
+        handler.updateMetadata({'trackNumber': 'three'});
 
-      await expectLater(
-        handler.applyMetadataChanges(),
-        throwsA(isA<MP4Exception>()),
-      );
-      expect(file.readAsBytesSync(), original);
-    });
+        await expectLater(
+          handler.applyMetadataChanges(),
+          throwsA(isA<MP4Exception>()),
+        );
+        expect(file.readAsBytesSync(), original);
+      },
+    );
 
     test('a file that is not an MP4 does not throw from the constructor', () {
       final file = writeFile([1, 2, 3]);

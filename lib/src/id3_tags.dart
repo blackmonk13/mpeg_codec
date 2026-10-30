@@ -21,13 +21,7 @@ class ID3v2Tag {
   final List<ID3v2Frame> frames;
 
   /// Constructs a new [ID3v2Tag] object.
-  ID3v2Tag(
-    this.version,
-    this.revision,
-    this.flags,
-    this.size,
-    this.frames,
-  );
+  ID3v2Tag(this.version, this.revision, this.flags, this.size, this.frames);
 }
 
 /// Represents a single frame in an ID3v2 tag.
@@ -48,12 +42,7 @@ class ID3v2Frame {
   final int flags;
 
   /// Constructs a new [ID3v2Frame] object.
-  ID3v2Frame(
-    this.id,
-    this.size,
-    this.data, {
-    this.flags = 0,
-  });
+  ID3v2Frame(this.id, this.size, this.data, {this.flags = 0});
 }
 
 class ID3v1Tag {

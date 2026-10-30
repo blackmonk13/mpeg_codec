@@ -51,8 +51,10 @@ final Map<String, String> _friendlyToFrameIds = {
 
 String _frameIdToKey(String frameId) {
   return _friendlyToFrameIds.entries
-      .firstWhere((entry) => entry.value == frameId,
-          orElse: () => MapEntry(frameId.toLowerCase(), frameId))
+      .firstWhere(
+        (entry) => entry.value == frameId,
+        orElse: () => MapEntry(frameId.toLowerCase(), frameId),
+      )
       .key;
 }
 
@@ -186,8 +188,10 @@ class ID3Handler extends CodecHandler {
         dataOffset = _parseExtendedHeader(tagData, version);
       }
 
-      List<ID3v2Frame> frames =
-          _parseID3v2Frames(tagData.sublist(dataOffset), version);
+      List<ID3v2Frame> frames = _parseID3v2Frames(
+        tagData.sublist(dataOffset),
+        version,
+      );
 
       if (footerPresent) {
         _parseID3v2Footer(file.readSync(10));
@@ -276,8 +280,9 @@ class ID3Handler extends CodecHandler {
       int frameSize = version == 4
           ? _syncSafeInteger(frameHeader.sublist(4, 8))
           : ByteData.view(frameHeader.buffer).getUint32(4, Endian.big);
-      int frameFlags =
-          ByteData.view(frameHeader.buffer).getUint16(8, Endian.big);
+      int frameFlags = ByteData.view(
+        frameHeader.buffer,
+      ).getUint16(8, Endian.big);
 
       if (frameId == '\x00\x00\x00\x00') break;
 
@@ -291,8 +296,12 @@ class ID3Handler extends CodecHandler {
         // Remember that a frame is unsynchronized even when only the tag says
         // so, since the tag flag is not written back.
         if (version == 4 && _tagUnsynchronized) frameFlags |= 0x0002;
-        ID3v2Frame frame =
-            ID3v2Frame(frameId, frameSize, frameData, flags: frameFlags);
+        ID3v2Frame frame = ID3v2Frame(
+          frameId,
+          frameSize,
+          frameData,
+          flags: frameFlags,
+        );
         // Keep the frame even if its metadata cannot be parsed, so that
         // writing the tag back does not lose it.
         frames.add(frame);
@@ -337,8 +346,9 @@ class ID3Handler extends CodecHandler {
     if (compressed) {
       try {
         int decompressedSize = _syncSafeInteger(frame.data.sublist(0, 4));
-        decompressedData =
-            Uint8List.fromList(ZLibDecoder().decodeBytes(decompressedData));
+        decompressedData = Uint8List.fromList(
+          ZLibDecoder().decodeBytes(decompressedData),
+        );
         if (decompressedData.length != decompressedSize) {
           logger.w('Decompressed size mismatch for frame ${frame.id}');
         }
@@ -435,10 +445,7 @@ class ID3Handler extends CodecHandler {
       _groupedFrames[frameId] = [];
     }
 
-    _groupedFrames[frameId]!.add({
-      'groupId': groupId,
-      'data': frameData,
-    });
+    _groupedFrames[frameId]!.add({'groupId': groupId, 'data': frameData});
   }
 
   /// Parses the ID3v2 synchronized lyrics frame.
@@ -459,8 +466,10 @@ class ID3Handler extends CodecHandler {
 
     var offset = 6;
     final descriptionEnd = _findNullTerminator(data, offset, encoding);
-    final description =
-        _decodeString(data.sublist(offset, descriptionEnd), encoding);
+    final description = _decodeString(
+      data.sublist(offset, descriptionEnd),
+      encoding,
+    );
     offset = descriptionEnd + step;
 
     // Each entry is a string, its terminator, and a 4-byte time stamp. The
@@ -672,10 +681,7 @@ class ID3Handler extends CodecHandler {
         genreList.add(value);
       }
     }
-    setMetadata(
-      'genre',
-      genreList.length == 1 ? genreList[0] : genreList,
-    );
+    setMetadata('genre', genreList.length == 1 ? genreList[0] : genreList);
   }
 
   String capitalize(String s) => s[0].toUpperCase() + s.substring(1);
@@ -698,13 +704,10 @@ class ID3Handler extends CodecHandler {
     if (parts.length >= 2) {
       String description = _decodeString(parts[0], encoding);
       String value = _decodeString(parts[1], encoding);
-      setMetadata(
-        'userDefinedText',
-        {
-          'description': description,
-          'value': value,
-        },
-      );
+      setMetadata('userDefinedText', {
+        'description': description,
+        'value': value,
+      });
     }
   }
 
@@ -739,7 +742,8 @@ class ID3Handler extends CodecHandler {
           break;
         default:
           logger.w(
-              'Unknown text encoding: $encoding, falling back to ISO-8859-1');
+            'Unknown text encoding: $encoding, falling back to ISO-8859-1',
+          );
           decodedStrings = latin1.decode(textData).split('\x00');
       }
     } catch (e) {
@@ -920,7 +924,13 @@ class ID3Handler extends CodecHandler {
           }
         }
 
-        final duration = _durationFromFrame(data, i, frame, start + i, fileSize);
+        final duration = _durationFromFrame(
+          data,
+          i,
+          frame,
+          start + i,
+          fileSize,
+        );
         if (duration != null) {
           _setDurationMetadata(duration);
           return duration;
@@ -947,7 +957,8 @@ class ID3Handler extends CodecHandler {
       bool crc,
       int length,
       int samplesPerFrame,
-    }) frame,
+    })
+    frame,
     int frameStart,
     int fileSize,
   ) {
@@ -960,7 +971,8 @@ class ID3Handler extends CodecHandler {
     final xing = offset + 4 + (frame.crc ? 2 : 0) + sideInfo;
     if (frame.layer == 1 && xing + 12 <= data.length) {
       final id = String.fromCharCodes(data.sublist(xing, xing + 4));
-      if ((id == 'Xing' || id == 'Info') && view.getUint32(xing + 4) & 0x1 != 0) {
+      if ((id == 'Xing' || id == 'Info') &&
+          view.getUint32(xing + 4) & 0x1 != 0) {
         final frames = view.getUint32(xing + 8);
         if (frames > 0) {
           return Duration(
@@ -1011,7 +1023,8 @@ class ID3Handler extends CodecHandler {
     bool crc,
     int length,
     int samplesPerFrame,
-  })? _readFrameHeader(Uint8List data, int i) {
+  })?
+  _readFrameHeader(Uint8List data, int i) {
     if (i + 4 > data.length) return null;
     if (data[i] != 0xFF || (data[i + 1] & 0xE0) != 0xE0) return null;
 
@@ -1024,8 +1037,9 @@ class ID3Handler extends CodecHandler {
     }
 
     final padding = (data[i + 2] >> 1) & 0x1;
-    final samplesPerFrame =
-        layer == 3 ? 384 : (layer == 2 || version == 3 ? 1152 : 576);
+    final samplesPerFrame = layer == 3
+        ? 384
+        : (layer == 2 || version == 3 ? 1152 : 576);
     final length = layer == 3
         ? (12000 * bitrate ~/ sampleRate + padding) * 4
         : (samplesPerFrame ~/ 8) * 1000 * bitrate ~/ sampleRate + padding;
@@ -1152,7 +1166,9 @@ class ID3Handler extends CodecHandler {
     for (var i = 0; i < data.length; i++) {
       result.addByte(data[i]);
       if (data[i] == 0xFF &&
-          (i + 1 == data.length || data[i + 1] == 0x00 || data[i + 1] >= 0xE0)) {
+          (i + 1 == data.length ||
+              data[i + 1] == 0x00 ||
+              data[i + 1] >= 0xE0)) {
         result.addByte(0x00);
       }
     }
@@ -1279,8 +1295,9 @@ class ID3Handler extends CodecHandler {
       // Check if the first eight bytes of the tagData are 'APETAGEX'
       if (String.fromCharCodes(footer.sublist(0, 8)) == 'APETAGEX') {
         int size = ByteData.view(footer.buffer).getUint32(12, Endian.little);
-        int itemCount =
-            ByteData.view(footer.buffer).getUint32(16, Endian.little);
+        int itemCount = ByteData.view(
+          footer.buffer,
+        ).getUint32(16, Endian.little);
 
         file.setPositionSync(file.lengthSync() - size - 32);
         Uint8List tagData = file.readSync(size);
@@ -1288,15 +1305,19 @@ class ID3Handler extends CodecHandler {
         int offset = 0;
         for (int i = 0; i < itemCount; i++) {
           Uint8List itemHeader = tagData.sublist(offset, offset + 8);
-          int valueLength =
-              ByteData.view(itemHeader.buffer).getUint32(0, Endian.little);
-          int flags =
-              ByteData.view(itemHeader.buffer).getUint32(4, Endian.little);
+          int valueLength = ByteData.view(
+            itemHeader.buffer,
+          ).getUint32(0, Endian.little);
+          int flags = ByteData.view(
+            itemHeader.buffer,
+          ).getUint32(4, Endian.little);
 
           int keyEnd = tagData.indexOf(0, offset + 8);
           String key = utf8.decode(tagData.sublist(offset + 8, keyEnd));
-          Uint8List value =
-              tagData.sublist(keyEnd + 1, keyEnd + 1 + valueLength);
+          Uint8List value = tagData.sublist(
+            keyEnd + 1,
+            keyEnd + 1 + valueLength,
+          );
 
           if ((flags & 0x01) != 0) {
             // Text item
@@ -1335,17 +1356,22 @@ class ID3Handler extends CodecHandler {
         Uint8List packet = file.readSync(packetSize);
         if (packet[0] == 3) {
           // Vorbis comment packet type
-          int vendorLength =
-              ByteData.view(packet.buffer).getUint32(7, Endian.little);
-          int commentListLength = ByteData.view(packet.buffer)
-              .getUint32(11 + vendorLength, Endian.little);
+          int vendorLength = ByteData.view(
+            packet.buffer,
+          ).getUint32(7, Endian.little);
+          int commentListLength = ByteData.view(
+            packet.buffer,
+          ).getUint32(11 + vendorLength, Endian.little);
 
           int offset = 15 + vendorLength;
           for (int i = 0; i < commentListLength; i++) {
-            int commentLength =
-                ByteData.view(packet.buffer).getUint32(offset, Endian.little);
-            Uint8List commentData =
-                packet.sublist(offset + 4, offset + 4 + commentLength);
+            int commentLength = ByteData.view(
+              packet.buffer,
+            ).getUint32(offset, Endian.little);
+            Uint8List commentData = packet.sublist(
+              offset + 4,
+              offset + 4 + commentLength,
+            );
             String comment = utf8.decode(commentData);
             List<String> parts = comment.split('=');
             if (parts.length == 2) {
@@ -1427,7 +1453,11 @@ class ID3Handler extends CodecHandler {
         header.setUint8(i, frame.id.codeUnitAt(i));
       }
       if (version == 4) {
-        header.buffer.asUint8List().setRange(4, 8, _getSyncSafeBytes(data.length));
+        header.buffer.asUint8List().setRange(
+          4,
+          8,
+          _getSyncSafeBytes(data.length),
+        );
       } else {
         header.setUint32(4, data.length, Endian.big);
       }
@@ -1446,11 +1476,11 @@ class ID3Handler extends CodecHandler {
   }
 
   Uint8List _tagHeader(int flags, int size) => Uint8List.fromList([
-        0x49, 0x44, 0x33, // 'ID3'
-        _writeVersion, 0x00, // version and revision
-        flags, // no extended header or footer
-        ..._getSyncSafeBytes(size),
-      ]);
+    0x49, 0x44, 0x33, // 'ID3'
+    _writeVersion, 0x00, // version and revision
+    flags, // no extended header or footer
+    ..._getSyncSafeBytes(size),
+  ]);
 
   /// Writes the file with [frames] as its ID3v2 tag, to a new file.
   ///
@@ -1555,10 +1585,9 @@ class ID3Handler extends CodecHandler {
     void setField(String key, int offset, int length) {
       if (!changes.containsKey(key)) return;
       // ID3v1 is ISO-8859-1, so anything outside it becomes '?'.
-      final text = _id3v1Text(changes[key]).replaceAll(
-        RegExp(r'[^\u0000-ÿ]'),
-        '?',
-      );
+      final text = _id3v1Text(
+        changes[key],
+      ).replaceAll(RegExp(r'[^\u0000-ÿ]'), '?');
       final bytes = latin1.encode(text);
       tag.fillRange(offset, offset + length, 0);
       tag.setRange(offset, offset + math.min(length, bytes.length), bytes);
@@ -1600,8 +1629,8 @@ class ID3Handler extends CodecHandler {
     final first = value is List
         ? (value.isEmpty ? null : value.first)
         : value is String
-            ? int.tryParse(value.split('/').first.trim())
-            : value;
+        ? int.tryParse(value.split('/').first.trim())
+        : value;
     return first is int && first > 0 && first <= 255 ? first : null;
   }
 
@@ -1638,7 +1667,9 @@ class ID3Handler extends CodecHandler {
       }
       if ((frame.id == 'TXXX' || frame.id == 'WXXX') && data.length > 1) {
         final description = _splitNullTerminated(data.sublist(1), data[0]);
-        return description.isEmpty ? '' : _decodeString(description[0], data[0]);
+        return description.isEmpty
+            ? ''
+            : _decodeString(description[0], data[0]);
       }
       if (frame.id == 'POPM') {
         final end = data.indexOf(0);
@@ -1688,8 +1719,9 @@ class ID3Handler extends CodecHandler {
     int version, {
     bool preferLatin1 = false,
   }) {
-    final fitsLatin1 =
-        strings.every((s) => s.codeUnits.every((c) => c <= 0xFF));
+    final fitsLatin1 = strings.every(
+      (s) => s.codeUnits.every((c) => c <= 0xFF),
+    );
 
     if (fitsLatin1 && (version == 3 || preferLatin1)) {
       return (
@@ -1746,8 +1778,8 @@ class ID3Handler extends CodecHandler {
       final pictures = value is Uint8List || value is Map
           ? [value]
           : value is List
-              ? value
-              : null;
+          ? value
+          : null;
       if (pictures == null) return null;
       final bodies = [for (final p in pictures) _encodePictureFrame(p)];
       return bodies.contains(null) ? null : bodies.cast<Uint8List>();
@@ -1762,8 +1794,8 @@ class ID3Handler extends CodecHandler {
       final fields = value is Map
           ? value
           : value is String
-              ? {'text': value}
-              : null;
+          ? {'text': value}
+          : null;
       if (fields == null) return null;
       final language = (fields['language'] ?? 'eng').toString();
       if (language.length != 3 || language.codeUnits.any((c) => c > 0x7F)) {
@@ -1954,7 +1986,9 @@ class ID3Handler extends CodecHandler {
       final text = _textFromValue(value, version);
       if (text == null) return null;
       final strings = _encodeStrings([text], version);
-      return [Uint8List.fromList([strings.encoding, ...strings.parts[0]])];
+      return [
+        Uint8List.fromList([strings.encoding, ...strings.parts[0]]),
+      ];
     }
 
     return null;
@@ -1991,7 +2025,8 @@ class ID3Handler extends CodecHandler {
 
     final bytes = <int>[];
     for (final entry in texts.entries) {
-      if (!RegExp(r'^T[A-Z0-9]{3}$').hasMatch(entry.key) || entry.key == 'TXXX') {
+      if (!RegExp(r'^T[A-Z0-9]{3}$').hasMatch(entry.key) ||
+          entry.key == 'TXXX') {
         return null;
       }
       final strings = _encodeStrings([entry.value], version);
@@ -2022,7 +2057,11 @@ class ID3Handler extends CodecHandler {
     if (pictureType is! int || pictureType < 0 || pictureType > 20) return null;
     if (mimeType.codeUnits.any((c) => c > 0x7F)) return null;
 
-    final strings = _encodeStrings([description], _writeVersion, preferLatin1: true);
+    final strings = _encodeStrings(
+      [description],
+      _writeVersion,
+      preferLatin1: true,
+    );
     return Uint8List.fromList([
       strings.encoding,
       ...ascii.encode(mimeType),
@@ -2123,7 +2162,8 @@ class ID3Handler extends CodecHandler {
     final id = encoded.first.id;
     final identity = _frameIdentity(encoded.first);
     bool replaced(ID3v2Frame frame) =>
-        frame.id == id && (identity == null || _frameIdentity(frame) == identity);
+        frame.id == id &&
+        (identity == null || _frameIdentity(frame) == identity);
 
     final index = frames.indexWhere(replaced);
     frames.removeWhere(replaced);

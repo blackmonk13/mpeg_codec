@@ -208,5 +208,5 @@ const List<String> genres = [
   'G-Funk',
   'Dubstep',
   'Garage Rock',
-  'Psybient'
+  'Psybient',
 ];
