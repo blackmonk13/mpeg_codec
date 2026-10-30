@@ -133,3 +133,7 @@ How writing behaves:
 
 `Metadata.get<T>` returns `null` when the value is not a `T`, instead of
 throwing.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
