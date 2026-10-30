@@ -41,13 +41,9 @@ class Atom {
   List<Atom> children = [];
 
   /// Constructs an instance of [Atom].
-  Atom(
-    this.type,
-    this.size,
-    this.offset, {
-    this.data,
-  })  : sourceOffset = offset,
-        sourceSize = size;
+  Atom(this.type, this.size, this.offset, {this.data})
+    : sourceOffset = offset,
+      sourceSize = size;
 
   /// Adds a child atom to the current atom.
   void addChild(Atom child) {
@@ -59,7 +55,9 @@ class Atom {
     final trailing = trailingData?.length ?? 0;
     if (children.isNotEmpty) {
       size = children.fold(0, (sum, child) => sum + child.size);
-      if (type != 'root') size += headerSize; // Add the header for non-root nodes
+      if (type != 'root') {
+        size += headerSize; // Add the header for non-root nodes
+      }
       if (type == 'meta') size += 4; // Add 4 for meta nodes
       size += trailing;
     } else if ((type == 'mdat' || streamed) && data == null) {

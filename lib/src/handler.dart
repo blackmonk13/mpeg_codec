@@ -32,7 +32,6 @@ class MetadataOperation {
   MetadataOperation(this.type, this.key, [this.value]);
 }
 
-
 /// Abstract class representing a codec handler for various audio file formats.
 /// This class provides methods for reading, parsing, modifying, and writing metadata in audio files.
 abstract class CodecHandler {
@@ -50,7 +49,6 @@ abstract class CodecHandler {
 
   /// A list of [MetadataOperation] objects representing pending metadata changes to be applied.
   final List<MetadataOperation> pendingOperations = [];
-
 
   /// Constructs a new instance of [CodecHandler].
   ///
@@ -121,11 +119,9 @@ abstract class CodecHandler {
   /// [newMetadata] is a map containing the new metadata entries to be added.
   void addMetadata(Map<String, dynamic> newMetadata) {
     for (var entry in newMetadata.entries) {
-      pendingOperations.add(MetadataOperation(
-        OperationType.add,
-        entry.key,
-        entry.value,
-      ));
+      pendingOperations.add(
+        MetadataOperation(OperationType.add, entry.key, entry.value),
+      );
     }
   }
 
@@ -134,11 +130,9 @@ abstract class CodecHandler {
   /// [newMetadata] is a map containing the updated metadata entries to be applied.
   void updateMetadata(Map<String, dynamic> newMetadata) {
     for (var entry in newMetadata.entries) {
-      pendingOperations.add(MetadataOperation(
-        OperationType.update,
-        entry.key,
-        entry.value,
-      ));
+      pendingOperations.add(
+        MetadataOperation(OperationType.update, entry.key, entry.value),
+      );
     }
   }
 
@@ -147,10 +141,7 @@ abstract class CodecHandler {
   /// [keys] is a list of keys for the metadata entries to be removed.
   void removeMetadata(List<String> keys) {
     for (var key in keys) {
-      pendingOperations.add(MetadataOperation(
-        OperationType.remove,
-        key,
-      ));
+      pendingOperations.add(MetadataOperation(OperationType.remove, key));
     }
   }
 

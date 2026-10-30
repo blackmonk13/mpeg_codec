@@ -1,7 +1,7 @@
 /// A package for handling MP4 and ID3 metadata and related operations.
 ///
-/// This package provides various modules for working with MP4 and ID3 metadata, 
-/// such as handling exceptions, managing genres, processing metadata, handling 
+/// This package provides various modules for working with MP4 and ID3 metadata,
+/// such as handling exceptions, managing genres, processing metadata, handling
 /// MP4 and ID3 codecs.
 library;
 

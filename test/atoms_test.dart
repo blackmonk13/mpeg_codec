@@ -154,7 +154,7 @@ void main() {
                 'size': 100,
                 'hasData': false,
                 'children': {},
-              }
+              },
             },
             1: {
               'mdia': {
@@ -162,7 +162,7 @@ void main() {
                 'size': 200,
                 'hasData': false,
                 'children': {},
-              }
+              },
             },
           },
         },
@@ -291,8 +291,10 @@ void main() {
       printAtomTree(root);
 
       // Verify the offsets of the child atoms of the meta atom
-      expect(metaChild1.offset,
-          equals(612)); // 12 bytes for meta node and first child
+      expect(
+        metaChild1.offset,
+        equals(612),
+      ); // 12 bytes for meta node and first child
       expect(metaChild2.offset, equals(662)); // 0 bytes for non-root node
     });
   });

@@ -52,7 +52,8 @@ class MP4Handler extends CodecHandler {
   };
 
   static final Map<String, String> _atomToFriendlyNames = Map.fromEntries(
-      _friendlyToAtomNames.entries.map((e) => MapEntry(e.value, e.key)));
+    _friendlyToAtomNames.entries.map((e) => MapEntry(e.value, e.key)),
+  );
 
   static const List<String> _containerAtoms = [
     'moov',
@@ -513,16 +514,19 @@ class MP4Handler extends CodecHandler {
     setMetadata('fileType', _decodeText(atomData.sublist(0, 4), 1));
 
     // Extract and decode the file type version
-    setMetadata('fileTypeVersion',
-        _decodeInteger(atomData.sublist(4, 8), signed: false));
+    setMetadata(
+      'fileTypeVersion',
+      _decodeInteger(atomData.sublist(4, 8), signed: false),
+    );
 
     final compatibleBrands = <String>[];
     int offset = 8;
 
     // Extract and decode the compatible brands
     while (offset < atomData.length) {
-      compatibleBrands
-          .add(_decodeText(atomData.sublist(offset, offset + 4), 1));
+      compatibleBrands.add(
+        _decodeText(atomData.sublist(offset, offset + 4), 1),
+      );
       offset += 4;
     }
 
@@ -600,7 +604,8 @@ class MP4Handler extends CodecHandler {
   /// Decodes big-endian UTF-16, which is what MP4 uses.
   String _decodeUtf16BE(Uint8List value) {
     return String.fromCharCodes([
-      for (var i = 0; i + 1 < value.length; i += 2) (value[i] << 8) | value[i + 1],
+      for (var i = 0; i + 1 < value.length; i += 2)
+        (value[i] << 8) | value[i + 1],
     ]);
   }
 
@@ -945,7 +950,8 @@ class MP4Handler extends CodecHandler {
       var position = 0;
       for (final atom in _root.children) {
         final padding = atom.type == 'free' || atom.type == 'skip';
-        final unchanged = padding &&
+        final unchanged =
+            padding &&
             atom.sourceOffset == position &&
             atom.sourceSize == atom.size;
         if ((atom.type == 'moov' || padding) && !unchanged) {
@@ -977,7 +983,12 @@ class MP4Handler extends CodecHandler {
   /// moving. Without a `free` atom there, a new one is made when the atoms
   /// shrank. Returns `false`, having changed nothing, when that is not possible.
   /// Each change adds a function to [undo].
-  bool _absorbSize(List<Atom> siblings, int index, int delta, List<void Function()> undo) {
+  bool _absorbSize(
+    List<Atom> siblings,
+    int index,
+    int delta,
+    List<void Function()> undo,
+  ) {
     if (delta == 0) return true;
 
     final next = index < siblings.length ? siblings[index] : null;
@@ -1029,7 +1040,12 @@ class MP4Handler extends CodecHandler {
       final inMeta = meta?.children.indexWhere((a) => identical(a, ilst)) ?? -1;
       if (meta != null &&
           inMeta != -1 &&
-          _absorbSize(meta.children, inMeta + 1, ilst.size - oldIlstSize, undo)) {
+          _absorbSize(
+            meta.children,
+            inMeta + 1,
+            ilst.size - oldIlstSize,
+            undo,
+          )) {
         updateTreeSizes();
         return;
       }
@@ -1086,7 +1102,11 @@ class MP4Handler extends CodecHandler {
         // Padding has no meaning, so it is written as zeros.
         final zeros = Uint8List(64 * 1024);
         for (var left = length; left > 0; left -= zeros.length) {
-          output.writeFromSync(zeros, 0, left < zeros.length ? left : zeros.length);
+          output.writeFromSync(
+            zeros,
+            0,
+            left < zeros.length ? left : zeros.length,
+          );
         }
       }
     } else if (atom.type == 'meta') {
@@ -1206,7 +1226,11 @@ class MP4Handler extends CodecHandler {
         size = end - position;
       }
       if (size < headerSize || position + size > end) break;
-      boxes.add((type: type, body: position + headerSize, end: position + size));
+      boxes.add((
+        type: type,
+        body: position + headerSize,
+        end: position + size,
+      ));
       position += size;
     }
     return boxes;
@@ -1290,7 +1314,8 @@ class MP4Handler extends CodecHandler {
       final count = view.getUint32(tfra.body + 12);
       final field = wide ? 8 : 4;
       // Time and offset, then the traf, trun and sample numbers.
-      final entry = 2 * field +
+      final entry =
+          2 * field +
           (((sizes >> 4) & 3) + 1) +
           (((sizes >> 2) & 3) + 1) +
           ((sizes & 3) + 1);
@@ -1363,10 +1388,9 @@ class MP4Handler extends CodecHandler {
     }
 
     // Cover art can hold several images.
-    final values =
-        atomName == 'covr' && value is List && value is! Uint8List
-            ? value
-            : [value];
+    final values = atomName == 'covr' && value is List && value is! Uint8List
+        ? value
+        : [value];
     if (values.isEmpty) {
       throw MP4Exception('$atomName needs at least one value');
     }
@@ -1386,9 +1410,17 @@ class MP4Handler extends CodecHandler {
       'data',
       0,
       8,
-      data: Uint8List.fromList(
-        [0, 0, 0, encoded.type, 0, 0, 0, 0, ...encoded.bytes],
-      ),
+      data: Uint8List.fromList([
+        0,
+        0,
+        0,
+        encoded.type,
+        0,
+        0,
+        0,
+        0,
+        ...encoded.bytes,
+      ]),
     )..updateSize();
   }
 
@@ -1443,14 +1475,18 @@ class MP4Handler extends CodecHandler {
     }
 
     Atom text(String type, String string) => Atom(
-          type,
-          0,
-          0,
-          data: Uint8List.fromList([0, 0, 0, 0, ...utf8.encode(string)]),
-        )..updateSize();
+      type,
+      0,
+      0,
+      data: Uint8List.fromList([0, 0, 0, 0, ...utf8.encode(string)]),
+    )..updateSize();
 
     final atom = Atom('----', 0, 0)
-      ..children.addAll([text('mean', mean), text('name', name), _dataAtom(encoded)]);
+      ..children.addAll([
+        text('mean', mean),
+        text('name', name),
+        _dataAtom(encoded),
+      ]);
     atom.updateSize();
     return atom;
   }
@@ -1488,7 +1524,9 @@ class MP4Handler extends CodecHandler {
 
       case 'covr':
         if (value is! Uint8List) {
-          throw MP4Exception('covr needs image bytes, got: ${value.runtimeType}');
+          throw MP4Exception(
+            'covr needs image bytes, got: ${value.runtimeType}',
+          );
         }
         return (type: _imageDataType(value), bytes: value);
 

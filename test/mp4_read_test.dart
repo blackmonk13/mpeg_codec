@@ -6,19 +6,19 @@ import 'package:mpeg_codec/mpeg_codec.dart';
 import 'package:test/test.dart';
 
 List<int> uint32(int value) => [
-      (value >> 24) & 0xFF,
-      (value >> 16) & 0xFF,
-      (value >> 8) & 0xFF,
-      value & 0xFF,
-    ];
+  (value >> 24) & 0xFF,
+  (value >> 16) & 0xFF,
+  (value >> 8) & 0xFF,
+  value & 0xFF,
+];
 
 List<int> uint64(int value) => [...uint32(value >> 32), ...uint32(value)];
 
 List<int> box(String type, List<int> payload) => [
-      ...uint32(8 + payload.length),
-      ...latin1.encode(type),
-      ...payload,
-    ];
+  ...uint32(8 + payload.length),
+  ...latin1.encode(type),
+  ...payload,
+];
 
 void main() {
   late Directory dir;
